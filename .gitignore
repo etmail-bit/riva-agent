@@ -1,0 +1,31 @@
+# 零洩漏原則：真實店家原始資料、機敏設定絕不進版控
+# 用 ** 遞迴比對，避免以後多一層子資料夾（例如備份檔）就沒被排除到
+# CLAUDE.md 含個人背景/轉職規劃說明，repo 公開後不放上去，只留本機給 AI 助理看
+CLAUDE.md
+data/raw/
+data/**/*.xlsx
+data/**/*.csv
+!data/*.example.csv
+排班/
+*.jpg
+*.jpeg
+*.png
+*.pdf
+.env
+.env.local
+.env.*.local
+!.env.example
+config/**/*.json
+!config/*.example.json
+config/**/*.yaml
+!config/*.example.yaml
+db/**/*.db
+db/**/*.sqlite3
+*.log
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+.DS_Store
+.playwright-mcp/

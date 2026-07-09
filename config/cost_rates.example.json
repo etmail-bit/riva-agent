@@ -1,0 +1,37 @@
+{
+  "_說明": "範本檔，數字為假資料，可進版控。真實數字放在 config/cost_rates.json（已被 .gitignore 排除）。",
+  "currency": "TWD",
+
+  "fixed_costs_monthly": {
+    "rent": 10000,
+    "utilities_estimate": 1000,
+    "labor_base": 50000,
+    "franchise_fee_amortization": 0
+  },
+
+  "variable_cost_rates": {
+    "cogs_pct_of_revenue": 0.30,
+    "cogs_note": "是否包含包材請自行標註",
+
+    "labor_insurance_overhead_pct": 0.196,
+    "labor_insurance_note": "勞保+健保+勞退雇主負擔概算率，可依當年度費率調整",
+
+    "platform_commission": {
+      "ubereats": 0.30,
+      "foodpanda": 0.30
+    },
+
+    "payment_processing": {
+      "credit_card": 0.03,
+      "other_electronic": 0.02
+    },
+
+    "business_tax_pct": 0.05,
+    "business_tax_note": "一般營業人 5%，小規模營業人可能是 1%",
+
+    "corporate_income_tax_pct": 0.20,
+    "corporate_income_tax_note": "有限公司/股份有限公司適用；獨資商號請設為 0，改用個人綜所稅估算"
+  },
+
+  "no_ongoing_franchise_royalty": true
+}

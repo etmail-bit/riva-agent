@@ -1,0 +1,33 @@
+{
+  "_說明": "範本檔，數字為假資料，可進版控。真實數字放在 config/staffing_rules.json（已被 .gitignore 排除）。",
+
+  "capacity": {
+    "cups_per_staff_per_hour": 30,
+    "note": "外場人員理論產能抓一個數字，再扣掉點餐/結帳等雜務後的實際可用產能"
+  },
+
+  "delivery": {
+    "fulfillment_minutes_per_order": 25,
+    "typical_orders_noon": 5,
+    "typical_orders_per_day": 8,
+    "note": "外送單已經包含在時段占比的日均杯數裡，這裡的數字只做 SLA 提醒用，不會重複疊加進人力公式"
+  },
+
+  "tea_brewing": {
+    "start_time": "07:30",
+    "estimated_duration_hours": 1.0,
+    "note": "煮茶這段時間該人力不計入前場產能，煮完後併入前場支援"
+  },
+
+  "shifts": [
+    {"name": "煮茶班", "start": "07:30", "end": "16:00"},
+    {"name": "早班1", "start": "09:00", "end": "17:00"},
+    {"name": "早班2", "start": "10:00", "end": "18:00"},
+    {"name": "晚班", "start": "12:00", "end": "20:00"}
+  ],
+
+  "part_time": {
+    "min_hours": 3,
+    "max_hours": 4
+  }
+}

@@ -1,0 +1,4 @@
+store_id,year_month,labor_actual,cogs_actual,utilities_actual,notes
+A,2026-04,150000,200000,8000,
+A,2026-05,,,,尚未取得實際數字，月盈虧會改用 config 概算值
+B,2026-04,140000,190000,7500,

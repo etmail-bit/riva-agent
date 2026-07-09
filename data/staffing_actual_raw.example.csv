@@ -1,0 +1,3 @@
+store_id,business_date,employee_code,shift_label,start_time,end_time,scheduled_hours
+A,2026-06-16,X,開早,07:30,16:00,8.0
+A,2026-06-17,X,假,,,

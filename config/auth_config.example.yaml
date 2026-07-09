@@ -1,0 +1,30 @@
+# 帳號設定檔範本（可進版控）。
+# 真正的 config/auth_config.yaml 內含雜湊密碼與 cookie 密鑰，已被 .gitignore 排除。
+#
+# 這份檔案不要手動編輯新增帳號，一律用 scripts/manage_accounts.py 操作，
+# 避免手改 yaml 縮排出錯，或不小心把明文密碼存進去。
+#
+# roles 說明：
+#   admin -> 可看「月盈虧」+「排班」
+#   staff -> 只能看「排班」
+credentials:
+  usernames:
+    demo_admin:
+      email: demo_admin@example.com
+      failed_login_attempts: 0
+      logged_in: false
+      name: 示範管理者
+      password: "$2b$12$examplehashexamplehashexamplehashexamplehashexampleh"
+      roles: [admin]
+    demo_staff:
+      email: demo_staff@example.com
+      failed_login_attempts: 0
+      logged_in: false
+      name: 示範排班人員
+      password: "$2b$12$examplehashexamplehashexamplehashexamplehashexampleh"
+      roles: [staff]
+
+cookie:
+  name: riva_agent_auth_cookie
+  key: replace-with-a-long-random-secret
+  expiry_days: 7
