@@ -24,8 +24,9 @@ from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data, is_shift_active
 from scripts.calculate_staffing import load_config as load_staffing_config
+from scripts.chart_helpers import build_trend_chart
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
-from scripts.pnl_insights import generate_pnl_insights
+from scripts.pnl_insights import generate_monthly_breakdown, generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "auth_config.yaml"
@@ -188,32 +189,22 @@ def render_combined_pnl_page(conn: sqlite3.Connection, stores: list[str]) -> Non
     store_colors = [CHART_COLOR_NET_PROFIT, CHART_COLOR_STORE_B_NET_PROFIT]
     domain = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
     color_range = store_colors[: len(stores)] + [CHART_COLOR_COMBINED_NET_PROFIT]
-    color_scale = alt.Color("項目:N", scale=alt.Scale(domain=domain, range=color_range), legend=alt.Legend(title=None))
-
-    line = (
-        alt.Chart(chart_df)
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("year_month:N", title="月份"),
-            y=alt.Y("金額:Q", title="金額（TWD）"),
-            color=color_scale,
-            tooltip=["year_month", "項目", "金額"],
-        )
-    )
-    labels = (
-        alt.Chart(chart_df)
-        .mark_text(dy=-10, fontSize=10)
-        .encode(
-            x=alt.X("year_month:N"),
-            y=alt.Y("金額:Q"),
-            text=alt.Text("金額:Q", format=","),
-            color=color_scale,
-        )
-    )
-    chart = alt.layer(line, labels).properties(height=320)
+    chart = build_trend_chart(chart_df, domain, color_range, height=320)
     st.altair_chart(chart, use_container_width=True)
 
     st.markdown(generate_pnl_insights(conn))
+
+    st.subheader("兩店合計逐月明細")
+    st.caption("手機看圖表標籤有限時，這張表可以左右滑動查看每個月的完整數字。")
+    table_records = []
+    for year_month, per_store in sorted(by_month.items()):
+        row = {"月份": year_month}
+        for sid in stores:
+            row[f"{sid} 店稅後淨利"] = per_store.get(sid)
+        if all(sid in per_store for sid in stores):
+            row["兩店合計淨利"] = sum(per_store[sid] for sid in stores)
+        table_records.append(row)
+    st.dataframe(pd.DataFrame(table_records), hide_index=True, use_container_width=True)
 
     st.subheader("營運報告（發票／營收／收銀機明細分析）")
     report = load_latest_operational_report()
@@ -593,60 +584,16 @@ def render_pnl_page() -> None:
         chart_domain.append("兩店合計淨利")
         chart_range.append(CHART_COLOR_COMBINED_NET_PROFIT)
 
-    color_scale = alt.Color(
-        "項目:N",
-        scale=alt.Scale(domain=chart_domain, range=chart_range),
-        legend=alt.Legend(title=None),
-    )
-    line = (
-        alt.Chart(chart_df)
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("year_month:N", title="月份"),
-            y=alt.Y("金額:Q", title="金額（TWD）"),
-            color=color_scale,
-            tooltip=["year_month", "項目", "金額"],
-        )
-    )
-    # 營收標在點上方、稅後淨利標在點下方，避免兩條線的數值標籤疊在一起看不清楚
-    revenue_labels = (
-        alt.Chart(chart_df[chart_df["項目"] == "營收"])
-        .mark_text(dy=-12, fontSize=11)
-        .encode(
-            x=alt.X("year_month:N"),
-            y=alt.Y("金額:Q"),
-            text=alt.Text("金額:Q", format=","),
-            color=color_scale,
-        )
-    )
-    net_profit_labels = (
-        alt.Chart(chart_df[chart_df["項目"] == "稅後淨利"])
-        .mark_text(dy=12, fontSize=11)
-        .encode(
-            x=alt.X("year_month:N"),
-            y=alt.Y("金額:Q"),
-            text=alt.Text("金額:Q", format=","),
-            color=color_scale,
-        )
-    )
-    layers = [line, revenue_labels, net_profit_labels]
-    if "兩店合計淨利" in chart_domain:
-        # 標在更下方（dy=28），避免跟稅後淨利的標籤疊在一起
-        combined_labels = (
-            alt.Chart(chart_df[chart_df["項目"] == "兩店合計淨利"])
-            .mark_text(dy=28, fontSize=11)
-            .encode(
-                x=alt.X("year_month:N"),
-                y=alt.Y("金額:Q"),
-                text=alt.Text("金額:Q", format=","),
-                color=color_scale,
-            )
-        )
-        layers.append(combined_labels)
-    chart = alt.layer(*layers).properties(height=300)
+    chart = build_trend_chart(chart_df, chart_domain, chart_range, height=300)
     st.altair_chart(chart, use_container_width=True)
 
     st.markdown(generate_pnl_insights(conn))
+
+    st.subheader(f"{store_id} 店逐月成本結構（找盈虧原因用）")
+    st.caption("成本欄位都是「占當月營收 %」，不是金額，這樣營收規模不同的月份才能直接比較。")
+    monthly_table = generate_monthly_breakdown(conn, store_id)
+    if monthly_table:
+        st.dataframe(pd.DataFrame(monthly_table), hide_index=True, use_container_width=True)
 
 
 def render_staffing_page() -> None:

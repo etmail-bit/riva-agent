@@ -76,6 +76,36 @@ def _has_any_cost_actuals(conn) -> bool:
     return dict(row)["c"] > 0
 
 
+def generate_monthly_breakdown(conn, store_id) -> list:
+    """回傳這店逐月的成本結構（占營收 %），一個月一筆 dict，方便逐月比較找盈虧原因。
+    百分比欄位而非金額欄位，才能跨月份（營收規模不同）直接比較。"""
+    rows = conn.execute(
+        "SELECT year_month, revenue, cogs, labor_cost, rent, utilities, "
+        "platform_commission, pretax_profit, net_profit "
+        "FROM monthly_pnl WHERE store_id = ? ORDER BY year_month",
+        (store_id,),
+    ).fetchall()
+
+    records = []
+    for r in rows:
+        row = dict(r)
+        revenue = row["revenue"] or 0
+        pct = (lambda v: round(v / revenue * 100, 1)) if revenue else (lambda v: None)
+        records.append({
+            "月份": row["year_month"],
+            "營收": revenue,
+            "原物料%": pct(row["cogs"]),
+            "人事%": pct(row["labor_cost"]),
+            "房租%": pct(row["rent"]),
+            "水電%": pct(row["utilities"]),
+            "平台抽成%": pct(row["platform_commission"]),
+            "稅前淨利": row["pretax_profit"],
+            "稅後淨利": row["net_profit"],
+            "損益": "虧損" if row["net_profit"] < 0 else "獲利",
+        })
+    return records
+
+
 def generate_pnl_insights(conn) -> str:
     """回傳一段 Markdown 文字，彙整兩店歷史月盈虧的觀察與建議。"""
     store_ids = [r["store_id"] for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
