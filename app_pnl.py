@@ -48,6 +48,16 @@ def _get_secret(key: str) -> str:
         return os.environ[key]
 
 
+def load_cost_rates_config() -> dict:
+    """雲端部署時，真實成本數字存在 Secrets 的 COST_RATES_JSON（內容是整份
+    cost_rates.json 的文字）；本機測試時沒有這把 key，fallback 讀本機檔案
+    （config/cost_rates.json 本來就被 .gitignore 排除，雲端主機讀不到）。"""
+    try:
+        return json.loads(st.secrets["COST_RATES_JSON"])
+    except Exception:
+        return load_pnl_config()
+
+
 @st.cache_resource
 def get_db_connection() -> TursoConnection:
     return TursoConnection(
@@ -158,7 +168,7 @@ def render_manual_revenue_section(conn: TursoConnection, store_id: str) -> None:
 
 def render_pnl_page() -> None:
     conn = get_db_connection()
-    config = load_pnl_config()
+    config = load_cost_rates_config()
 
     stores = [
         r["store_id"]
@@ -361,7 +371,9 @@ def render_pnl_page() -> None:
 
     col_save_default, col_save_actual = st.columns(2)
     with col_save_default:
-        if st.button("儲存為新的預設值", key="save_cost_rates"):
+        if is_cloud:
+            st.caption("雲端版本不支援「儲存為新的預設值」（雲端硬碟重啟後會還原），請用「儲存為本月實際值」，或聯絡管理者更新 Secrets。")
+        elif st.button("儲存為新的預設值", key="save_cost_rates"):
             config["fixed_costs_monthly"]["labor_base"] = labor_base
             config["fixed_costs_monthly"]["rent"] = rent
             config["fixed_costs_monthly"]["utilities_estimate"] = utilities
