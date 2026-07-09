@@ -300,6 +300,17 @@ Layer 3（分析產出）
 
 驗證：本機／模擬雲端兩條路徑都重新跑過，`estimate_staffing_cost.py` 輸出數字跟手算交叉核對一致，`app.py`／`app_pnl.py` import 正常。
 
+## 教訓：「結論文字」不等於「安全可公開」（2026-07-09）
+
+上一節做完後，使用者同意把 `store_operational_insights`／`store_staffing_insights` 同步上 Turso（公開雲端 DB），前提是「raw data 千萬不要放上去」。第一次同步時判斷失誤：**只確認了表格結構放不進逐筆原始資料，沒有檢查結論文字的「內容」本身**——`estimate_staffing_cost.py` 產生的結論句裡直接寫了真實人事成本、固定薪資金額；`analyze_operations.py` 的結論句裡也寫了真實客單價金額、營收佔比。這兩者都上傳到 Turso 了，發現後立刻從 Turso 刪除（本機資料未受影響）。
+
+跟使用者確認公開範圍後，改成：
+- `store_staffing_insights` 拆成兩欄：`summary_text`（完整版，含真實金額，只留本機，`app.py` 用）／`public_summary_text`（只放「預估可節省金額」，這一欄才會被同步）。`scripts/migrate_layer2_to_turso.py` 的 `migrate_staffing_insights()` 只讀 `public_summary_text`。
+- `store_operational_insights`（通路組合／客單價）使用者決定完全不公開，已從 `db/schema_cloud.sql` 移除、Turso 上的表也已 `DROP TABLE`，這支同步腳本完全不處理這張表。
+- 已重新驗證 Turso 上 `store_staffing_insights.summary_text` 現在只有「預估可節省金額」，沒有其他真實數字，`store_operational_insights` 表已不存在。
+
+**通用教訓（已記錄進 memory 的 feedback，跨專案適用）**：判斷「能不能公開」不能只看資料表欄位設計，要連**自由文字欄位裡實際寫了什麼內容**都要逐一檢查——欄位名稱叫「摘要」「結論」不代表內容一定安全，尤其是這種「目的就是要講出具體數字」的分析型文字。
+
 ## 這次對話最後在討論的方向
 
-排班瓶頸分析已量化成保守/積極兩版方案，寫進 `estimate_staffing_cost.py` 的固定報告邏輯。下一步候選（尚未定案）：① B 店排班原始資料謄打進來後重跑分析，看瓶頸模式是否一致；② 決定要不要把保守版班表提案實際排進現場（現在只是分析建議，還沒有變成排班表）；③ `store_operational_insights`／`store_staffing_insights` 兩張本機表要不要同步上雲端。若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。
+排班瓶頸分析已量化成保守/積極兩版方案，寫進 `estimate_staffing_cost.py` 的固定報告邏輯，且只有「預估可節省金額」同步上雲端。下一步候選（尚未定案）：① B 店排班原始資料謄打進來後重跑分析，看瓶頸模式是否一致；② 決定要不要把保守版班表提案實際排進現場（現在只是分析建議，還沒有變成排班表）。若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。
