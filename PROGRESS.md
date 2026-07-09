@@ -194,7 +194,7 @@ Layer 3（分析產出）
 - 新增 `app_pnl.py`：從 `app.py` 搬出月盈虧相關的部分（`render_pnl_page`／`render_manual_revenue_section`），排班相關程式碼完全沒有 import。資料庫連線改用 `TursoConnection`，優先讀 `st.secrets`（雲端部署後用），本機測試 fallback 讀 `.env`（`_get_secret()` 函式處理這個切換，兩邊共用同一份程式碼不用分岔）
 - **效能優化**：`TursoConnection` 原本每次查詢都重新建立一次 HTTPS 連線，一頁面 9~10 次查詢會很慢；改成用 `requests.Session` 重複使用連線 (keep-alive)
 - **已用 Playwright 實測驗證（本機 port 8502，非正式 demo 帳密，測試後已重設）**：登入 → 選店別 A 店 → 展開「手動輸入月營收」→ 輸入測試月份 `2099-01`／營收 100000 → 儲存 → 直接查 Turso 確認寫入成功 → 月份下拉選單正確出現 `2099-01` → 試算結果正確顯示（營收 100,000、稅後淨利 -353,000，跟本機固定成本設定相符）→ 歷史走勢區塊正常。**測試資料已清除，Turso 恢復乾淨狀態。**
-- **效能觀察（待里程碑 4 後重新評估，不要現在就下定論）**：從這台除錯用機器測試，整頁跑完約 14 秒（優化前 18 秒）。這個數字量測的是「除錯機器所在網路 → 美國西岸 Turso」的路徑，**不代表未來正式部署後的真實路徑**（正式路徑是「Streamlit Community Cloud 伺服器 → Turso」，兩邊很可能同樣在美國，速度可能完全不同）。目前先不因為這個不準的數字搬機房（Turso 有東京機房 `aws-ap-northeast-1` 可選，之後真的需要再搬，現在資料庫是空的搬遷成本很低）。**等里程碑 4 部署上去後，要重新實測一次真實載入速度，若還是慢再決定要不要換機房或做查詢批次化。**
+- **效能結論（已於里程碑 4 驗證，問題已關閉）**：除錯機器測試量到 14 秒，一度懷疑要換 Turso 機房；部署到 Streamlit Cloud 後，使用者實測真實載入時間是 **1.3 秒**。證實當初的猜測是對的——慢的是「除錯機器所在網路 → 美國西岸 Turso」這段路徑本身，不是 Turso 或程式碼的問題，正式路徑（Streamlit Cloud 伺服器 → Turso）速度完全沒問題。**不用換機房，也不用做查詢批次化。**
 **里程碑 3（已完成）：GitHub private repo**
 - 安裝 GitHub CLI (`gh`，官方 zip 下載到 `~/.local/gh`，非 Homebrew)，用 `gh auth login --web` 完成裝置授權登入（帳號 `etmail-bit`）
 - 推送前逐一檢查即將進版控的檔案清單（`git add -A -n` 預覽），並全文搜尋真實店名/員工姓名確認沒有漏網
@@ -227,7 +227,6 @@ Layer 3（分析產出）
 2026-07-09 部署成功，使用者已在自己的終端機重設 `demo_admin` 為正式密碼（全程沒有經過我，密碼只有使用者知道），並把 `AUTH_CONFIG_YAML`／`COST_RATES_JSON`／`TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN` 更新進 Streamlit Cloud 的 Secrets。實際登入畫面確認：登入成功、雲端模式提示正確顯示、「A 店目前沒有已驗證的營收資料」警告正確（Turso 上還是空的，符合預期）、沒有任何錯誤訊息。
 
 **待做**：
-- 部署成功後**要重新實測載入速度**（見上方效能觀察那段），問使用者實際操作時的主觀感受
 - 里程碥 5：把本機真實資料的 Layer 2 彙總結果（`daily_revenue_validated`／`monthly_cost_actuals`）從本機 `db/riva_agent.db` 灌一份進 Turso，正式開始使用（這步會動到真實財務數字上雲，需要跟使用者再次確認）
 - 待決：`validate_revenue.py`／`import_cost_actuals.py` 這兩支「本機處理、寫 Layer 2」的腳本，之後要嘛改寫 Turso（讓本機匯入直接寫雲端），要嘛維持寫本機、另外一支同步腳本推上雲——兩種都可行，尚未定案，等里程碥 4 全部做完（先確認整條路能通）再決定
 
