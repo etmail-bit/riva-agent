@@ -216,7 +216,7 @@ Layer 3（分析產出）
 
 現在 repo（`etmail-bit/riva-agent`）是 **PUBLIC**，只有一次乾淨的 commit，已用 GitHub API 直接確認歷史紀錄乾淨。
 
-**里程碑 4（進行中）：Streamlit Community Cloud 部署**
+**里程碑 4（已完成）：Streamlit Community Cloud 部署**
 
 第一次部署後立刻噴 `FileNotFoundError`：`scripts/calculate_pnl.py` 的 `load_config()` 直接讀本機 `config/cost_rates.json`（真實成本數字，被 `.gitignore` 排除），雲端主機讀不到。這是跟帳號設定檔（`AUTH_CONFIG_YAML`）同一種模式的坑，之前只顧著修帳密那個，漏了這個。
 
@@ -224,9 +224,10 @@ Layer 3（分析產出）
 
 **驗證方式（重要，之後改動 app_pnl.py 都要照這個流程）**：不能只測本機模式，要「本機模擬雲端模式」——在本機建一個假的 `.streamlit/secrets.toml`（放真實 Turso 連線資訊 + 真實 auth/cost 設定內容），重啟 Streamlit，實際登入操作確認 `is_cloud=True` 分支真的能跑，測完把 `.streamlit/secrets.toml` 內容清空（該檔已加進 `.gitignore`，但本機殘留明文密碼雜湊/金鑰不是好習慣）。這次用這個方法在本機就抓到並驗證修好了 `COST_RATES_JSON` 的問題，沒有再讓使用者在雲端上重複試錯。
 
+2026-07-09 部署成功，使用者已在自己的終端機重設 `demo_admin` 為正式密碼（全程沒有經過我，密碼只有使用者知道），並把 `AUTH_CONFIG_YAML`／`COST_RATES_JSON`／`TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN` 更新進 Streamlit Cloud 的 Secrets。實際登入畫面確認：登入成功、雲端模式提示正確顯示、「A 店目前沒有已驗證的營收資料」警告正確（Turso 上還是空的，符合預期）、沒有任何錯誤訊息。
+
 **待做**：
-- 使用者需要在自己的終端機重設 `demo_admin` 密碼（開發過程中被多次設成測試密碼），並把新的 `AUTH_CONFIG_YAML`／`COST_RATES_JSON` 內容更新進 Streamlit Cloud 的 Secrets
-- 部署成功後**要重新實測載入速度**（見上方效能觀察那段）
+- 部署成功後**要重新實測載入速度**（見上方效能觀察那段），問使用者實際操作時的主觀感受
 - 里程碥 5：把本機真實資料的 Layer 2 彙總結果（`daily_revenue_validated`／`monthly_cost_actuals`）從本機 `db/riva_agent.db` 灌一份進 Turso，正式開始使用（這步會動到真實財務數字上雲，需要跟使用者再次確認）
 - 待決：`validate_revenue.py`／`import_cost_actuals.py` 這兩支「本機處理、寫 Layer 2」的腳本，之後要嘛改寫 Turso（讓本機匯入直接寫雲端），要嘛維持寫本機、另外一支同步腳本推上雲——兩種都可行，尚未定案，等里程碥 4 全部做完（先確認整條路能通）再決定
 
