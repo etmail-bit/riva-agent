@@ -26,7 +26,7 @@ from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_dat
 from scripts.calculate_staffing import load_config as load_staffing_config
 from scripts.chart_helpers import build_trend_chart
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
-from scripts.pnl_insights import generate_monthly_breakdown, generate_pnl_insights
+from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "auth_config.yaml"
@@ -44,6 +44,20 @@ CHART_COLOR_STORE_B_NET_PROFIT = "#7c3aed"
 REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 st.set_page_config(page_title="飲料店營運效能優化系統", page_icon="🧋")
+
+# 走勢圖改成固定月距寬度後（見 chart_helpers.py），圖表本身會比手機螢幕寬。
+# 沒有這段 CSS 的話，瀏覽器預設把「整個網頁」都撐寬變成橫向捲動，標題/文字跟著一起
+# 滑走；限定只有圖表所在的 stFullScreenFrame 容器可以橫向捲動，其餘版面維持不動。
+st.markdown(
+    """
+    <style>
+    div[data-testid="stFullScreenFrame"] {
+        overflow-x: auto;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def load_latest_operational_report() -> str | None:
@@ -190,12 +204,12 @@ def render_combined_pnl_page(conn: sqlite3.Connection, stores: list[str]) -> Non
     domain = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
     color_range = store_colors[: len(stores)] + [CHART_COLOR_COMBINED_NET_PROFIT]
     chart = build_trend_chart(chart_df, domain, color_range, height=320)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=False)
 
     st.markdown(generate_pnl_insights(conn))
 
     st.subheader("兩店合計逐月明細")
-    st.caption("手機看圖表標籤有限時，這張表可以左右滑動查看每個月的完整數字。")
+    st.caption("手機看圖表標籤有限時，這張表可以左右滑動查看每個月的完整數字，最後一列是累計金額。")
     table_records = []
     for year_month, per_store in sorted(by_month.items()):
         row = {"月份": year_month}
@@ -204,6 +218,8 @@ def render_combined_pnl_page(conn: sqlite3.Connection, stores: list[str]) -> Non
         if all(sid in per_store for sid in stores):
             row["兩店合計淨利"] = sum(per_store[sid] for sid in stores)
         table_records.append(row)
+    sum_cols = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
+    table_records = add_total_row(table_records, "月份", sum_cols)
     st.dataframe(pd.DataFrame(table_records), hide_index=True, use_container_width=True)
 
     st.subheader("營運報告（發票／營收／收銀機明細分析）")
@@ -585,14 +601,15 @@ def render_pnl_page() -> None:
         chart_range.append(CHART_COLOR_COMBINED_NET_PROFIT)
 
     chart = build_trend_chart(chart_df, chart_domain, chart_range, height=300)
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=False)
 
     st.markdown(generate_pnl_insights(conn))
 
     st.subheader(f"{store_id} 店逐月成本結構（找盈虧原因用）")
-    st.caption("成本欄位都是「占當月營收 %」，不是金額，這樣營收規模不同的月份才能直接比較。")
+    st.caption("成本欄位都是「占當月營收 %」，不是金額，這樣營收規模不同的月份才能直接比較；最後一列是累計金額（百分比欄位加總沒有意義，留空）。")
     monthly_table = generate_monthly_breakdown(conn, store_id)
     if monthly_table:
+        monthly_table = add_total_row(monthly_table, "月份", ["營收", "稅前淨利", "稅後淨利"])
         st.dataframe(pd.DataFrame(monthly_table), hide_index=True, use_container_width=True)
 
 

@@ -6,6 +6,19 @@
 """
 
 
+def add_total_row(records: list, label_col: str, sum_cols: list, label_value: str = "累計") -> list:
+    """在逐月明細表格尾端加一列加總（使用者要求：一眼看到累計虧損/獲利金額，
+    不用自己逐月加）。只加總 sum_cols 指定的金額欄位——百分比欄位加總沒有意義
+    （例如「原物料% 加總」不是任何有意義的數字），一律留 None 不顯示。"""
+    if not records:
+        return records
+    total_row = {k: None for k in records[0].keys()}
+    total_row[label_col] = label_value
+    for col in sum_cols:
+        total_row[col] = sum(r[col] for r in records if r.get(col) is not None)
+    return records + [total_row]
+
+
 def _store_stats(conn, store_id):
     rows = conn.execute(
         "SELECT year_month, revenue, cogs, labor_cost, rent, utilities, "

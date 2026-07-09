@@ -194,9 +194,10 @@ def build_staffing_summary(s: dict) -> str:
     return (
         f"依真實排班反推（樣本 {s['actual']['date_range'][0]}～{s['actual']['date_range'][1]}，"
         f"{s['n']} 天）：平均每天排班 {s['actual_per_day']:.1f} 人-小時。"
-        f"估計可省下的變動成本，保守版（尖峰維持緩衝人力）約 "
-        f"{cons['avoidable_cost_per_day'] * 30:,.0f} 元/月，積極版（尖峰也砍到操作下限，"
-        f"風險較高，僅供參考）約 {aggr['avoidable_cost_per_day'] * 30:,.0f} 元/月。"
+        f"估計可省下的人力時數，保守版（尖峰維持緩衝人力）約每天 {cons['avoidable_per_day']:.1f} 小時"
+        f"（約 {cons['avoidable_per_day'] * 30:.0f} 小時/月，換算成本約 {cons['avoidable_cost_per_day'] * 30:,.0f} 元/月），"
+        f"積極版（尖峰也砍到操作下限，風險較高，僅供參考）約每天 {aggr['avoidable_per_day']:.1f} 小時"
+        f"（約 {aggr['avoidable_per_day'] * 30:.0f} 小時/月，換算成本約 {aggr['avoidable_cost_per_day'] * 30:,.0f} 元/月）。"
         f"換算含勞健保的人事成本約 {schedule_monthly:,.0f} 元/月，"
         f"比系統目前預設概算值（{default_monthly:,.0f} 元/月）{direction}約 {diff:,.0f} 元，"
         "建議之後改用真實排班／薪資單校準，不要只套預設值。"
@@ -204,15 +205,17 @@ def build_staffing_summary(s: dict) -> str:
 
 
 def build_public_staffing_summary(s: dict) -> str:
-    """2026-07-09 使用者確認的公開範圍：只放「預估可節省金額」，不含真實人事成本／
-    固定薪資／實際排班時數這些底片數字。這個版本（不是 build_staffing_summary()
-    那個完整版）才是 migrate_layer2_to_turso.py 會同步上雲端的內容。"""
+    """2026-07-09 使用者確認的公開範圍：只放「預估可節省金額」跟「省下的人力時數」，
+    不含真實人事成本／固定薪資／實際排班時數這些底片數字。這個版本（不是
+    build_staffing_summary() 那個完整版）才是 migrate_layer2_to_turso.py 會同步
+    上雲端的內容。"""
     cons, aggr = s["scenarios"]["conservative"], s["scenarios"]["aggressive"]
     return (
-        "排班分析：尖峰時段人力配置有調整空間，估計每月可節省變動成本，"
-        f"保守版（尖峰維持緩衝人力）約 {cons['avoidable_cost_per_day'] * 30:,.0f} 元，"
+        "排班分析：尖峰時段人力配置有調整空間，估計每月可節省的人力時數與變動成本，"
+        f"保守版（尖峰維持緩衝人力）約 {cons['avoidable_per_day'] * 30:.0f} 小時／"
+        f"{cons['avoidable_cost_per_day'] * 30:,.0f} 元，"
         f"積極版（尖峰也砍到操作下限，風險較高，僅供參考）約 "
-        f"{aggr['avoidable_cost_per_day'] * 30:,.0f} 元。"
+        f"{aggr['avoidable_per_day'] * 30:.0f} 小時／{aggr['avoidable_cost_per_day'] * 30:,.0f} 元。"
     )
 
 
