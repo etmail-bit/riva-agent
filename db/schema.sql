@@ -196,3 +196,26 @@ CREATE TABLE monthly_pnl (
     calculated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(store_id, year_month)
 );
+
+-- analyze_operations.py 算出的通路/客單價/尖峰時段「濃縮結論」快取（一兩句話等級的聚合統計句，
+-- 不存任何逐筆明細），給 pnl_insights.py 的「各店經營現況」交叉引用用。
+-- 之所以另外存一張只含結論文字的表，是因為 Layer 1 原始明細表（raw_invoice_transactions 等）
+-- 只存在本機、刻意不同步到雲端 Turso DB；這張表之後若要同步上雲端，只會送出聚合後的結論文字，
+-- 不會把逐筆發票/通路明細送上去。2026-07-09 使用者決定：先只在本機累積，何時同步上雲端另外處理，
+-- 所以目前刻意不加進 schema_cloud.sql。
+CREATE TABLE store_operational_insights (
+    store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
+    summary_text TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- scripts/estimate_staffing_cost.py 算出的「實際排班 vs 合理人力」結論快取，
+-- 同一套「只存聚合結論、不存逐筆明細」的道理：raw_staffing_actual／員工薪資結構
+-- 只存在本機。哪個店有這張表的資料，pnl_insights.py 的建議段落就用真實排班反推的
+-- 結論；沒有的店（例如還沒謄打排班資料的店）繼續用原本的通用估計句子。
+-- 2026-07-09 使用者決定：跟 store_operational_insights 一樣先只在本機累積。
+CREATE TABLE store_staffing_insights (
+    store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
+    summary_text TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

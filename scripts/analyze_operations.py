@@ -90,7 +90,51 @@ def peak_hours(conn, store_id, top_n=5):
     return [(r["hour_slot"], r["avg_sales"], r["avg_cups"]) for r in rows]
 
 
-def build_report(conn, store_ids) -> str:
+def _compute_all(conn, store_ids) -> dict:
+    return {
+        sid: {
+            "mix": channel_mix(conn, sid),
+            "inv": invoice_stats(conn, sid),
+            "peaks": peak_hours(conn, sid),
+        }
+        for sid in store_ids
+    }
+
+
+def build_operational_summary(data: dict) -> str:
+    """把單店的通路/客單價/尖峰時段數字濃縮成一兩句「結論」，供 pnl_insights.py
+    的「各店經營現況」段落交叉引用。刻意只保留聚合統計（佔比/中位數/時段），
+    不含逐筆明細，是唯一之後可能考慮同步上雲端的內容。"""
+    mix, inv, peaks = data["mix"], data["inv"], data["peaks"]
+    parts = [f"通路組合上外送平台佔營收 {mix['delivery_pct']*100:.0f}%（會被抽 35% 佣金）"]
+    if inv:
+        parts.append(f"客單價中位數 {inv['median']:.0f} 元")
+    if peaks:
+        parts.append(f"尖峰時段集中在 {peaks[0][0]}:00 前後")
+    return "，".join(parts) + "。"
+
+
+def persist_operational_insights(conn, per_store: dict) -> None:
+    """把濃縮結論寫進 store_operational_insights，只有這張表存在時才寫
+    （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。"""
+    exists = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='store_operational_insights'"
+    ).fetchone()
+    if exists is None:
+        return
+    for sid, data in per_store.items():
+        summary = build_operational_summary(data)
+        conn.execute(
+            "INSERT INTO store_operational_insights (store_id, summary_text, generated_at) "
+            "VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(store_id) DO UPDATE SET "
+            "summary_text = excluded.summary_text, generated_at = excluded.generated_at",
+            (sid, summary),
+        )
+    conn.commit()
+
+
+def build_report(conn, store_ids, per_store: dict | None = None) -> str:
     lines = [
         f"# 營運報告（{date.today().isoformat()} 產出）",
         "",
@@ -99,12 +143,11 @@ def build_report(conn, store_ids) -> str:
         "",
     ]
 
-    per_store = {}
+    if per_store is None:
+        per_store = _compute_all(conn, store_ids)
+
     for sid in store_ids:
-        mix = channel_mix(conn, sid)
-        inv = invoice_stats(conn, sid)
-        peaks = peak_hours(conn, sid)
-        per_store[sid] = {"mix": mix, "inv": inv, "peaks": peaks}
+        mix, inv, peaks = per_store[sid]["mix"], per_store[sid]["inv"], per_store[sid]["peaks"]
 
         lines.append(f"## {sid} 店")
         lines.append("")
@@ -185,7 +228,8 @@ def build_report(conn, store_ids) -> str:
 def main():
     conn = _conn()
     store_ids = [r[0] for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id")]
-    report = build_report(conn, store_ids)
+    per_store = _compute_all(conn, store_ids)
+    report = build_report(conn, store_ids, per_store)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     out_path = REPORTS_DIR / f"operational_report_{date.today().isoformat()}.md"
@@ -193,6 +237,9 @@ def main():
     print(f"營運報告已寫入 {out_path}")
     print()
     print(report)
+
+    persist_operational_insights(conn, per_store)
+    print("已把濃縮結論寫入 store_operational_insights（給月盈虧頁交叉引用用）。")
 
 
 if __name__ == "__main__":

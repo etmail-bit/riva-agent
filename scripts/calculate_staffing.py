@@ -55,11 +55,19 @@ def is_tea_brewing_hour(hour_slot, config):
     return start_hour <= hour < start_hour + duration
 
 
+def _time_to_minutes(value):
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
 def is_shift_active(hour_slot, shift, config):
+    """用分鐘級的區間重疊判斷，而不是只看小時整數——班別現在有 17:30/18:30 這種
+    半點結束的時間，只截小時的話會把最後半小時所在的那個 hour_slot 漏掉。"""
     hour = int(hour_slot)
-    start_hour = int(shift["start"].split(":")[0])
-    end_hour = int(shift["end"].split(":")[0])
-    return start_hour <= hour < end_hour
+    window_start, window_end = hour * 60, (hour + 1) * 60
+    start_minutes = _time_to_minutes(shift["start"])
+    end_minutes = _time_to_minutes(shift["end"])
+    return start_minutes < window_end and end_minutes > window_start
 
 
 def calculate_hourly_staffing(hourly_data, config):

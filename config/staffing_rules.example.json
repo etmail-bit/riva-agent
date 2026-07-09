@@ -3,7 +3,9 @@
 
   "capacity": {
     "cups_per_staff_per_hour": 30,
-    "note": "外場人員理論產能抓一個數字，再扣掉點餐/結帳等雜務後的實際可用產能"
+    "note": "外場人員理論產能抓一個數字，再扣掉點餐/結帳等雜務後的實際可用產能",
+    "min_floor_staff": 2,
+    "min_floor_note": "純用杯量算出來的建議人力，離峰時段可能只算出 1 人，但現場至少要有人顧收銀＋出杯，這是操作面下限"
   },
 
   "delivery": {
@@ -20,14 +22,37 @@
   },
 
   "shifts": [
-    {"name": "煮茶班", "start": "07:30", "end": "16:00"},
-    {"name": "早班1", "start": "09:00", "end": "17:00"},
-    {"name": "早班2", "start": "10:00", "end": "18:00"},
-    {"name": "晚班", "start": "12:00", "end": "20:00"}
+    {"name": "開早", "start": "07:30", "end": "16:00"},
+    {"name": "早一", "start": "09:00", "end": "17:30"},
+    {"name": "早二", "start": "10:00", "end": "18:30"},
+    {"name": "尖峰班", "start": "11:00", "end": "14:30"},
+    {"name": "晚班", "start": "17:30", "end": "21:30"}
   ],
 
   "part_time": {
     "min_hours": 3,
     "max_hours": 4
+  },
+
+  "wages": {
+    "manager_monthly": 99999,
+    "staff_monthly": 88888,
+    "part_time_hourly": 199,
+    "overtime_hourly": 199,
+    "daily_regular_hours": 8,
+    "note": "範本假數字。正職（店長/店員）領固定月薪，每天前 daily_regular_hours 小時內排班不算變動成本；超過的算加班，跟兼職一樣以時薪計。"
+  },
+
+  "employee_roles": {
+    "_說明": "員工代碼 → 角色（manager／staff／part_time），範本假代碼。",
+    "X": "manager",
+    "Y": "staff",
+    "Z": "part_time"
+  },
+
+  "scenario": {
+    "peak_hours": ["11", "12", "13"],
+    "peak_floor_staff": 3,
+    "peak_note": "尖峰時段杯量若已接近人力產能上限，全部砍到操作下限風險較高。「保守版」在這幾個時段維持 peak_floor_staff 人當緩衝；「積極版」尖峰也套用跟離峰一樣的 min_floor_staff，是純公式算出來的理論上限，不建議直接照做，先當參考基準。"
   }
 }

@@ -64,6 +64,48 @@ def _combined_stats(conn, store_count):
     return {"n": n, "avg_combined": avg_combined, "loss_months": loss_months}
 
 
+def _table_exists(conn, name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _pinpoint_worst_month(records: list) -> dict | None:
+    """從 generate_monthly_breakdown() 的逐月成本結構裡找出淨利最差的月份，
+    以及當月哪個成本科目 % 明顯高於這家店自己的歷史平均——不重新查資料庫，
+    直接拿現成的逐月資料算，跟該店自己比較（不同店固定成本結構本來就不同，
+    跟別店比沒有意義）。"""
+    valid = [r for r in records if r["稅後淨利"] is not None]
+    if len(valid) < 2:
+        return None
+
+    cost_cols = ["原物料%", "人事%", "房租%", "水電%", "平台抽成%"]
+    worst = min(valid, key=lambda r: r["稅後淨利"])
+    avgs = {
+        col: sum(v) / len(v)
+        for col in cost_cols
+        if (v := [r[col] for r in valid if r[col] is not None])
+    }
+    deviations = {
+        col: worst[col] - avgs[col]
+        for col in cost_cols
+        if worst.get(col) is not None and col in avgs
+    }
+    if not deviations:
+        return None
+
+    driver_col = max(deviations, key=deviations.get)
+    return {
+        "month": worst["月份"],
+        "net_profit": worst["稅後淨利"],
+        "driver_label": driver_col.rstrip("%"),
+        "driver_pct": worst[driver_col],
+        "driver_avg_pct": avgs[driver_col],
+        "deviation": deviations[driver_col],
+    }
+
+
 def _has_any_cost_actuals(conn) -> bool:
     columns = [
         "labor_actual", "cogs_actual", "utilities_actual", "rent_actual",
@@ -128,7 +170,15 @@ def generate_pnl_insights(conn) -> str:
             )
         line = f"- **{sid} 店**：{status}。"
 
-        if s["fixed_pct_of_revenue"] is not None and s["fixed_pct_of_revenue"] > 0.5:
+        pin = _pinpoint_worst_month(generate_monthly_breakdown(conn, sid))
+        if pin is not None and pin["deviation"] >= 2:
+            line += (
+                f" 淨利最差的月份是 {pin['month']}（稅後淨利 {pin['net_profit']:,} 元），"
+                f"當月{pin['driver_label']}占營收 {pin['driver_pct']:.1f}%，"
+                f"比{sid} 店自己的平均（{pin['driver_avg_pct']:.1f}%）高出 {pin['deviation']:.1f} 個百分點，"
+                "是該月主要的獲利壓力來源。"
+            )
+        elif s["fixed_pct_of_revenue"] is not None and s["fixed_pct_of_revenue"] > 0.5:
             line += f" 固定成本（人事＋房租＋水電＋加盟金攤提）平均占營收約 {s['fixed_pct_of_revenue']*100:.0f}%，偏高，是主要壓力來源。"
 
         if s["trend"] is not None:
@@ -139,6 +189,13 @@ def generate_pnl_insights(conn) -> str:
 
         if s["manual_months"] > 0:
             line += f"（其中 {s['manual_months']} 個月營收是手動輸入、非 POS 稽核過，數字僅供參考）"
+
+        if _table_exists(conn, "store_operational_insights"):
+            op_row = conn.execute(
+                "SELECT summary_text FROM store_operational_insights WHERE store_id = ?", (sid,)
+            ).fetchone()
+            if op_row is not None:
+                line += f" {dict(op_row)['summary_text']}"
 
         lines.append(line)
 
@@ -160,18 +217,34 @@ def generate_pnl_insights(conn) -> str:
             "還沒有任何一個月填入真實成本數字（`monthly_cost_actuals`）。"
             "概算跟實際的落差是目前分析最大的不確定性來源，建議優先補真實數字。"
         )
-    lines.append(
-        "- 先前「實際排班 vs 建議人力」比對發現多數時段有超編現象，"
-        "若屬實，目前人事成本的概算值可能低估真實負擔，建議優先核對薪資單校準。"
-    )
+    has_staffing = _table_exists(conn, "store_staffing_insights")
+    for sid in stats_by_store:
+        staffing_row = None
+        if has_staffing:
+            staffing_row = conn.execute(
+                "SELECT summary_text FROM store_staffing_insights WHERE store_id = ?", (sid,)
+            ).fetchone()
+        if staffing_row is not None:
+            lines.append(f"- **{sid} 店**：{dict(staffing_row)['summary_text']}")
+        else:
+            lines.append(
+                f"- **{sid} 店**：先前「實際排班 vs 建議人力」比對發現多數時段有超編現象，"
+                "若屬實，目前人事成本的概算值可能低估真實負擔，建議優先核對薪資單校準。"
+            )
     if len(stats_by_store) > 1:
         revenues = {sid: s["avg_revenue"] for sid, s in stats_by_store.items()}
         best_store = max(revenues, key=revenues.get)
         worst_store = min(revenues, key=revenues.get)
         if best_store != worst_store:
+            gap = revenues[best_store] - revenues[worst_store]
+            gap_pct = gap / revenues[worst_store] * 100 if revenues[worst_store] else None
+            gap_desc = f"約 {gap:,.0f} 元" + (f"（高 {gap_pct:.0f}%）" if gap_pct is not None else "")
+            has_ops = _table_exists(conn, "store_operational_insights")
             lines.append(
-                f"- {best_store} 店平均營收高於 {worst_store} 店，兩店固定成本結構類似，"
-                f"可比對兩店在座位/時段/品項組合上的差異，找出可複製到 {worst_store} 店的做法。"
+                f"- {best_store} 店平均月營收比 {worst_store} 店高{gap_desc}，兩店固定成本結構類似，"
+                f"可比對兩店在通路組合／客單價／尖峰時段人力配置上的差異"
+                + ("（見上方各店經營現況段落）" if has_ops else "")
+                + f"，找出可複製到 {worst_store} 店的做法。"
             )
 
     return "\n".join(lines)
