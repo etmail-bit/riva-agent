@@ -21,6 +21,7 @@ config/**/*.yaml
 !config/*.example.yaml
 db/**/*.db
 db/**/*.sqlite3
+reports/
 *.log
 __pycache__/
 *.pyc

@@ -226,16 +226,39 @@ Layer 3（分析產出）
 
 2026-07-09 部署成功，使用者已在自己的終端機重設 `demo_admin` 為正式密碼（全程沒有經過我，密碼只有使用者知道），並把 `AUTH_CONFIG_YAML`／`COST_RATES_JSON`／`TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN` 更新進 Streamlit Cloud 的 Secrets。實際登入畫面確認：登入成功、雲端模式提示正確顯示、「A 店目前沒有已驗證的營收資料」警告正確（Turso 上還是空的，符合預期）、沒有任何錯誤訊息。
 
+**里程碑 5（已完成，2026-07-09）：真實資料搬遷上 Turso**
+
+跟使用者確認風險（真實金額透過網路傳到第三方雲端服務）後執行。新增 `scripts/migrate_layer2_to_turso.py`，把本機 `daily_revenue_validated`（602 筆）／`monthly_cost_actuals`（1 筆）／`monthly_pnl`（20 筆，跟使用者另外確認過後追加）用 `INSERT ... ON CONFLICT DO UPDATE` 寫進 Turso（冪等可重跑，本機資料異動後重跑即可同步最新狀態）。刻意不搬 Layer 1 原始報表（收銀機/發票/銷售明細）與排班相關表格，永遠只留在本機。
+
+驗證：三張表筆數與加總金額（`revenue_from_register`／`net_profit`）本機/雲端比對一致；用「本機模擬雲端模式」（見里程碑 4 驗證方式）登入雲端版，A 店 2026-06 試算結果跟本機完全一致、B 店房租正確顯示 override 值、**歷史走勢圖（含兩店合計線）跟彙整建議區塊都正常顯示，數字與本機一致**。
+
+同一次順便完成的網頁優化（使用者於 2026-07-09 提出，已用 Playwright 實測驗證）：
+1. **成本設定支援單店 override**：`config/cost_rates.json` 新增 `fixed_costs_monthly_overrides`（key 是 store_id），`scripts/calculate_pnl.py` 新增 `get_fixed_cost(config, store_id, key)` 統一查詢邏輯，app.py／app_pnl.py 的固定成本輸入框、what-if 試算、「儲存為新的預設值」按鈕都改用這個函式（後者的邏輯是：這個店這個項目已經有 override 就繼續存回 override，否則存回共用預設值）。用來讓 B 店房租跟共用預設值分開調整（真實數字只在 `config/cost_rates.json`，不進版控；過程中有一次輸入金額打錯位數，使用者當場發現並更正，已重算）。
+2. **歷史走勢圖新增「兩店合計淨利」線**：只加總「所有店都有資料」的月份（`HAVING COUNT(DISTINCT store_id) = 店數`），避免只有單店資料的月份被誤算成合計數字；用第三種顏色（`#d97706`）跟數值標籤（`dy=28`，避開跟稅後淨利標籤重疊）。
+3. **月盈虧頁新增「各店經營現況」＋「建議」彙整區塊**：新增 `scripts/pnl_insights.py`，`generate_pnl_insights(conn)` 從 `monthly_pnl`／`monthly_cost_actuals` 即時查詢計算（虧損月數、固定成本占營收比、近期趨勢、是否有手動輸入月份等），組成 Markdown 顯示在走勢圖下方，**不把任何真實數字寫死在程式碼裡**，調整成本設定後結論會自動跟著變、不用改程式碼。套用目前最新設定跑出來的質化結論（**具體金額/比例不記錄在此檔案，屬於真實財務數字，見零洩漏原則；使用者可從網頁「彙整」頁面查詢實際數字**）：A 店持續虧損，B 店損益接近打平但虧損月份仍占多數，兩店合計目前仍是虧損。彙整建議裡也連結了先前「實際排班 vs 建議人力比對」發現的普遍超編現象，提醒人事成本概算可能被低估。
+
 **待做**：
-- 里程碥 5：把本機真實資料的 Layer 2 彙總結果（`daily_revenue_validated`／`monthly_cost_actuals`）從本機 `db/riva_agent.db` 灌一份進 Turso，正式開始使用（這步會動到真實財務數字上雲，需要跟使用者再次確認）
-- 待決：`validate_revenue.py`／`import_cost_actuals.py` 這兩支「本機處理、寫 Layer 2」的腳本，之後要嘛改寫 Turso（讓本機匯入直接寫雲端），要嘛維持寫本機、另外一支同步腳本推上雲——兩種都可行，尚未定案，等里程碥 4 全部做完（先確認整條路能通）再決定
+- 待決：`validate_revenue.py`／`import_cost_actuals.py` 這兩支「本機處理、寫 Layer 2」的腳本，之後要嘛改寫 Turso（讓本機匯入直接寫雲端），要嘛維持寫本機、另外一支同步腳本推上雲，之後每次本機資料異動（訂正、新增月份）都要記得重跑 `scripts/migrate_layer2_to_turso.py` 才會同步——兩種都可行，尚未定案
+
+**Streamlit Cloud 的 `COST_RATES_JSON` Secret 已由使用者手動更新（2026-07-09 確認網頁已生效）。**
+
+## 「彙整」頁面＋原始明細營運報告（已完成，2026-07-09）
+
+使用者提出：月盈虧頁除了 A/B 兩店，希望能有第三個「彙整」選項，看兩店合計盈虧趨勢，以及分析發票／營收／收銀機明細（Layer 1 原始明細）產出的營運報告與建議。**前提（使用者明確提出）：加盟店不能自行調價、原物料成本也是固定的，所以建議一律只談操作面槓桿，不談調價／砍原物料成本。**
+
+1. **「彙整」選項**：app.py／app_pnl.py 的店別下拉選單新增第三個選項（`stores + ["彙整"]`），選中後呼叫 `render_combined_pnl_page()`，跳過單店可調參數試算的所有邏輯，只顯示：兩店合計盈虧趨勢圖（3 條線：A 店/B 店/兩店合計稅後淨利，各店用不同色）＋ `generate_pnl_insights()` 彙整建議。app_pnl.py（雲端）版本到此為止；app.py（本機）版本下面多一段「營運報告」。
+2. **`scripts/analyze_operations.py`（新增，只在本機用）**：讀 `raw_invoice_transactions`／`raw_revenue_monthly`／`raw_cash_register_daily`／`raw_hourly_pattern_monthly`（Layer 1，僅本機資料庫，10~11 萬筆等級），分析三個角度：
+   - **通路組合**：把 `raw_revenue_monthly.order_type` 分成「外送平台」（會被抽 35% 佣金）跟「自取/外帶」兩組，算佔營收比例
+   - **客單價分布**：`raw_invoice_transactions`（只算 `tx_status='正常'`）的平均/中位數/25分位/75分位
+   - **尖峰時段**：`raw_hourly_pattern_monthly` 依 `daily_avg_sales` 排序找每店前幾名時段
+   - 加上兩店比較（哪店外送佔比較高、客單價差多少、尖峰時段是否重疊），跟依「不能調價/原物料成本固定」前提寫的建議（通路組合／尖峰時段人力配置／客單價提升手法）
+   - 輸出到 `reports/operational_report_<YYYY-MM-DD>.md`（新目錄，已加進 `.gitignore`，報告內容含真實通路/客單價數字不可進版控）。用法：`python3 -m scripts.analyze_operations`
+3. **app.py 讀取報告**：`load_latest_operational_report()` 抓 `reports/` 底下最新一份 `operational_report_*.md`，`render_combined_pnl_page()` 用 `st.markdown()` 顯示在彙整建議下方。**這支函式跟 `analyze_operations.py` 都只有 app.py 會 import，app_pnl.py 完全沒引用**，符合零洩漏原則（Layer 1 原始明細衍生的分析不上雲）。
+
+**本機真實資料跑出來的質化發現**（供之後決策參考，具體百分比/金額不記錄在此檔案，屬於真實營運數字，見零洩漏原則；使用者可從網頁「彙整」頁面或重跑 `analyze_operations.py` 查詢實際數字）：A 店外送平台佔營收比例明顯高於 B 店，代表 A 店有較高比例營收被平台佣金抽走，是 A 店持續虧損的其中一個結構性原因（疊加在先前已知的「人力普遍超編」發現之上）；兩店尖峰時段高度重疊在中午時段；兩店客單價中位數都偏低。
+
+驗證：CLI 執行 `analyze_operations.py` 確認輸出內容正確；本機 Playwright 選「彙整」確認走勢圖+建議+營運報告都正確顯示；雲端版（本機模擬雲端模式）選「彙整」確認只顯示走勢圖+建議、不含營運報告（符合設計）。
 
 ## 這次對話最後在討論的方向
 
-2026-07-08 完成四項網頁優化，皆已用 Playwright 實測驗證：
-1. 月盈虧頁試算參數從 5 項可調擴大到 11 項（開放平台/金流費率、稅率），分組成 4 個摺疊區塊
-2. 新增 `monthly_revenue_manual` 表 + `monthly_pnl.revenue_source` 欄位，`calculate_pnl.py` 改成 POS 優先、無資料才 fallback 手動輸入
-3. 月盈虧頁新增「手動輸入月營收」表單（預填既有值、合理性檢查、可清除）
-4. 月盈虧歷史走勢圖加數值標籤
-
-月盈虧、排班建議兩個網頁頁面（皆含可調參數 what-if 試算），加上「實際排班 vs 建議人力比對」跟啟動腳本，都已完成並驗證過。下一步在「待完成」列的候選方向裡挑，尚未定案要先做哪一個。若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。
+里程碑 5 已完成，下一步在上面「待做」列的候選方向裡挑，尚未定案。若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。

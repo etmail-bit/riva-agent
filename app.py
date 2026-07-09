@@ -20,11 +20,12 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 
-from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_revenue_breakdown, save_pnl_result
+from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data, is_shift_active
 from scripts.calculate_staffing import load_config as load_staffing_config
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
+from scripts.pnl_insights import generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "auth_config.yaml"
@@ -36,8 +37,23 @@ COST_CONFIG_PATH = ROOT / "config" / "cost_rates.json"
 # 營收 = 藍，稅後淨利 = 青綠
 CHART_COLOR_REVENUE = "#2a78d6"
 CHART_COLOR_NET_PROFIT = "#1baf7a"
+CHART_COLOR_COMBINED_NET_PROFIT = "#d97706"
+CHART_COLOR_STORE_B_NET_PROFIT = "#7c3aed"
+
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 st.set_page_config(page_title="飲料店營運效能優化系統", page_icon="🧋")
+
+
+def load_latest_operational_report() -> str | None:
+    """讀 reports/ 底下最新一份 scripts/analyze_operations.py 產出的營運報告
+    （Layer 1 原始明細分析結果，只放本機，這支函式只在 app.py 用，app_pnl.py 不會 import）。"""
+    if not REPORTS_DIR.exists():
+        return None
+    files = sorted(REPORTS_DIR.glob("operational_report_*.md"), reverse=True)
+    if not files:
+        return None
+    return files[0].read_text(encoding="utf-8")
 
 
 @st.cache_resource
@@ -147,6 +163,68 @@ def render_manual_revenue_section(conn: sqlite3.Connection, store_id: str) -> No
             st.rerun()
 
 
+def render_combined_pnl_page(conn: sqlite3.Connection, stores: list[str]) -> None:
+    st.subheader("兩店合計盈虧趨勢")
+    rows = conn.execute(
+        "SELECT year_month, store_id, net_profit FROM monthly_pnl ORDER BY year_month"
+    ).fetchall()
+    if not rows:
+        st.caption("monthly_pnl 還沒有歷史紀錄，請先執行 scripts/calculate_pnl.py。")
+        return
+
+    by_month: dict[str, dict[str, int]] = {}
+    for r in rows:
+        by_month.setdefault(r["year_month"], {})[r["store_id"]] = r["net_profit"]
+
+    records = []
+    for year_month, per_store in sorted(by_month.items()):
+        for sid in stores:
+            if sid in per_store:
+                records.append((year_month, f"{sid} 店稅後淨利", per_store[sid]))
+        if all(sid in per_store for sid in stores):
+            records.append((year_month, "兩店合計淨利", sum(per_store[sid] for sid in stores)))
+
+    chart_df = pd.DataFrame(records, columns=["year_month", "項目", "金額"])
+    store_colors = [CHART_COLOR_NET_PROFIT, CHART_COLOR_STORE_B_NET_PROFIT]
+    domain = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
+    color_range = store_colors[: len(stores)] + [CHART_COLOR_COMBINED_NET_PROFIT]
+    color_scale = alt.Color("項目:N", scale=alt.Scale(domain=domain, range=color_range), legend=alt.Legend(title=None))
+
+    line = (
+        alt.Chart(chart_df)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("year_month:N", title="月份"),
+            y=alt.Y("金額:Q", title="金額（TWD）"),
+            color=color_scale,
+            tooltip=["year_month", "項目", "金額"],
+        )
+    )
+    labels = (
+        alt.Chart(chart_df)
+        .mark_text(dy=-10, fontSize=10)
+        .encode(
+            x=alt.X("year_month:N"),
+            y=alt.Y("金額:Q"),
+            text=alt.Text("金額:Q", format=","),
+            color=color_scale,
+        )
+    )
+    chart = alt.layer(line, labels).properties(height=320)
+    st.altair_chart(chart, use_container_width=True)
+
+    st.markdown(generate_pnl_insights(conn))
+
+    st.subheader("營運報告（發票／營收／收銀機明細分析）")
+    report = load_latest_operational_report()
+    if report:
+        st.markdown(report)
+    else:
+        st.caption(
+            "尚未產生營運報告，請在終端機執行：`python3 -m scripts.analyze_operations`"
+        )
+
+
 def render_pnl_page() -> None:
     conn = get_db_connection()
     config = load_pnl_config()
@@ -155,7 +233,14 @@ def render_pnl_page() -> None:
         r["store_id"]
         for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()
     ]
-    store_id = st.selectbox("店別", stores, format_func=lambda s: f"{s} 店")
+    store_choice = st.selectbox(
+        "店別", stores + ["彙整"],
+        format_func=lambda s: "彙整（兩店合計）" if s == "彙整" else f"{s} 店",
+    )
+    if store_choice == "彙整":
+        render_combined_pnl_page(conn, stores)
+        return
+    store_id = store_choice
 
     with st.expander("手動輸入月營收（POS 沒資料時的備援）"):
         render_manual_revenue_section(conn, store_id)
@@ -213,7 +298,6 @@ def render_pnl_page() -> None:
     overridden = [label for key, label in ACTUAL_FIELD_LABELS.items() if actuals.get(key) is not None]
     if overridden:
         st.caption(f"📌 {store_id} 店 {year_month} 已有本月實際值覆蓋：{'、'.join(overridden)}")
-    fixed = config["fixed_costs_monthly"]
     rates = config["variable_cost_rates"]
 
     with st.expander("固定成本", expanded=True):
@@ -221,19 +305,26 @@ def render_pnl_page() -> None:
         with col1:
             labor_base = st.number_input(
                 "人事底薪（元/月）", min_value=0, step=1000,
-                value=int(actuals["labor_actual"] if actuals["labor_actual"] is not None else fixed["labor_base"]),
+                value=int(
+                    actuals["labor_actual"] if actuals["labor_actual"] is not None
+                    else get_fixed_cost(config, store_id, "labor_base")
+                ),
                 key=k("labor_base"),
             )
             rent = st.number_input(
                 "房租（元/月）", min_value=0, step=1000,
-                value=int(actuals["rent_actual"] if actuals["rent_actual"] is not None else fixed["rent"]),
+                value=int(
+                    actuals["rent_actual"] if actuals["rent_actual"] is not None
+                    else get_fixed_cost(config, store_id, "rent")
+                ),
                 key=k("rent"),
             )
         with col2:
             utilities = st.number_input(
                 "水電概算（元/月）", min_value=0, step=500,
                 value=int(
-                    actuals["utilities_actual"] if actuals["utilities_actual"] is not None else fixed["utilities_estimate"]
+                    actuals["utilities_actual"] if actuals["utilities_actual"] is not None
+                    else get_fixed_cost(config, store_id, "utilities_estimate")
                 ),
                 key=k("utilities"),
             )
@@ -242,7 +333,7 @@ def render_pnl_page() -> None:
                 value=int(
                     actuals["franchise_amortization_actual"]
                     if actuals["franchise_amortization_actual"] is not None
-                    else fixed["franchise_fee_amortization"]
+                    else get_fixed_cost(config, store_id, "franchise_fee_amortization")
                 ),
                 key=k("franchise_amortization"),
             )
@@ -335,10 +426,13 @@ def render_pnl_page() -> None:
             )
 
     working_config = copy.deepcopy(config)
-    working_config["fixed_costs_monthly"]["labor_base"] = labor_base
-    working_config["fixed_costs_monthly"]["rent"] = rent
-    working_config["fixed_costs_monthly"]["utilities_estimate"] = utilities
-    working_config["fixed_costs_monthly"]["franchise_fee_amortization"] = franchise_amortization
+    # 寫進「該店的 override」而不是共用預設值，這樣不管這個欄位原本是共用值還是
+    # 單店 override，頁面上調整的數字都能正確蓋掉、拿去算 calculate_one()。
+    working_store_override = working_config.setdefault("fixed_costs_monthly_overrides", {}).setdefault(store_id, {})
+    working_store_override["labor_base"] = labor_base
+    working_store_override["rent"] = rent
+    working_store_override["utilities_estimate"] = utilities
+    working_store_override["franchise_fee_amortization"] = franchise_amortization
     working_config["variable_cost_rates"]["cogs_pct_of_revenue"] = cogs_pct / 100
     working_config["variable_cost_rates"]["platform_commission"]["ubereats"] = ubereats_pct / 100
     working_config["variable_cost_rates"]["platform_commission"]["foodpanda"] = foodpanda_pct / 100
@@ -354,10 +448,20 @@ def render_pnl_page() -> None:
     col_save_default, col_save_actual = st.columns(2)
     with col_save_default:
         if st.button("儲存為新的預設值", key="save_cost_rates"):
-            config["fixed_costs_monthly"]["labor_base"] = labor_base
-            config["fixed_costs_monthly"]["rent"] = rent
-            config["fixed_costs_monthly"]["utilities_estimate"] = utilities
-            config["fixed_costs_monthly"]["franchise_fee_amortization"] = franchise_amortization
+            # 這個店已經有 override 的項目，繼續存回 override（不動共用值，避免動到另一店）；
+            # 沒有 override 的項目，存回共用預設值（跟現有兩店共用的行為一致）。
+            store_overrides = config.setdefault("fixed_costs_monthly_overrides", {}).setdefault(store_id, {})
+
+            def save_fixed(key, value):
+                if key in store_overrides:
+                    store_overrides[key] = value
+                else:
+                    config["fixed_costs_monthly"][key] = value
+
+            save_fixed("labor_base", labor_base)
+            save_fixed("rent", rent)
+            save_fixed("utilities_estimate", utilities)
+            save_fixed("franchise_fee_amortization", franchise_amortization)
             config["variable_cost_rates"]["cogs_pct_of_revenue"] = cogs_pct / 100
             config["variable_cost_rates"]["platform_commission"]["ubereats"] = ubereats_pct / 100
             config["variable_cost_rates"]["platform_commission"]["foodpanda"] = foodpanda_pct / 100
@@ -470,12 +574,28 @@ def render_pnl_page() -> None:
 
     history_df = pd.DataFrame(history, columns=["year_month", "營收", "稅後淨利"])
     chart_df = history_df.melt("year_month", var_name="項目", value_name="金額")
+
+    # 兩店合計淨利：只算「所有店都有資料」的月份，避免只有單店資料的月份被誤算成合計數字
+    combined_rows = conn.execute(
+        "SELECT year_month, SUM(net_profit) AS combined_net_profit, "
+        "COUNT(DISTINCT store_id) AS store_count "
+        "FROM monthly_pnl GROUP BY year_month HAVING store_count = ? ORDER BY year_month",
+        (len(stores),),
+    ).fetchall()
+    chart_domain = ["營收", "稅後淨利"]
+    chart_range = [CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT]
+    if len(stores) > 1 and combined_rows:
+        combined_df = pd.DataFrame(
+            [(r["year_month"], "兩店合計淨利", r["combined_net_profit"]) for r in combined_rows],
+            columns=["year_month", "項目", "金額"],
+        )
+        chart_df = pd.concat([chart_df, combined_df], ignore_index=True)
+        chart_domain.append("兩店合計淨利")
+        chart_range.append(CHART_COLOR_COMBINED_NET_PROFIT)
+
     color_scale = alt.Color(
         "項目:N",
-        scale=alt.Scale(
-            domain=["營收", "稅後淨利"],
-            range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
-        ),
+        scale=alt.Scale(domain=chart_domain, range=chart_range),
         legend=alt.Legend(title=None),
     )
     line = (
@@ -509,8 +629,24 @@ def render_pnl_page() -> None:
             color=color_scale,
         )
     )
-    chart = alt.layer(line, revenue_labels, net_profit_labels).properties(height=300)
+    layers = [line, revenue_labels, net_profit_labels]
+    if "兩店合計淨利" in chart_domain:
+        # 標在更下方（dy=28），避免跟稅後淨利的標籤疊在一起
+        combined_labels = (
+            alt.Chart(chart_df[chart_df["項目"] == "兩店合計淨利"])
+            .mark_text(dy=28, fontSize=11)
+            .encode(
+                x=alt.X("year_month:N"),
+                y=alt.Y("金額:Q"),
+                text=alt.Text("金額:Q", format=","),
+                color=color_scale,
+            )
+        )
+        layers.append(combined_labels)
+    chart = alt.layer(*layers).properties(height=300)
     st.altair_chart(chart, use_container_width=True)
+
+    st.markdown(generate_pnl_insights(conn))
 
 
 def render_staffing_page() -> None:

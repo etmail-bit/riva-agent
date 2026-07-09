@@ -9,6 +9,13 @@
     "franchise_fee_amortization": 0
   },
 
+  "fixed_costs_monthly_overrides": {
+    "_說明": "只放跟共用預設值不同的單店項目，key 是 store_id；範例：B 店房租跟共用值不同",
+    "B": {
+      "rent": 8000
+    }
+  },
+
   "variable_cost_rates": {
     "cogs_pct_of_revenue": 0.30,
     "cogs_note": "是否包含包材請自行標註",

@@ -32,6 +32,15 @@ def load_config():
     return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
 
 
+def get_fixed_cost(config, store_id, key):
+    """回傳某店的固定成本設定值：`fixed_costs_monthly_overrides` 裡有該店該項目就用
+    override（例如兩店房租不同），否則 fallback 用 `fixed_costs_monthly` 的共用預設值。"""
+    overrides = config.get("fixed_costs_monthly_overrides", {}).get(store_id, {})
+    if key in overrides:
+        return overrides[key]
+    return config["fixed_costs_monthly"][key]
+
+
 def get_periods(conn):
     """回傳有資料的 (store_id, year_month) 清單，聯集 POS 稽核資料（daily_revenue_validated）
     跟手動輸入備援資料（monthly_revenue_manual），兩邊有任一邊資料就會出現在清單上。"""
@@ -135,21 +144,28 @@ def calculate_one(conn, config, store_id, year_month):
     other_electronic_amount = revenue_row["other_electronic_amount"] or 0
 
     actuals = get_cost_actuals(conn, store_id, year_month)
-    fixed = config["fixed_costs_monthly"]
     rates = config["variable_cost_rates"]
 
     cogs = actuals["cogs_actual"] if actuals["cogs_actual"] is not None else round(revenue * rates["cogs_pct_of_revenue"])
 
-    labor_base = actuals["labor_actual"] if actuals["labor_actual"] is not None else fixed["labor_base"]
+    labor_base = (
+        actuals["labor_actual"]
+        if actuals["labor_actual"] is not None
+        else get_fixed_cost(config, store_id, "labor_base")
+    )
     labor_cost = round(labor_base * (1 + rates["labor_insurance_overhead_pct"]))
 
-    utilities = actuals["utilities_actual"] if actuals["utilities_actual"] is not None else fixed["utilities_estimate"]
+    utilities = (
+        actuals["utilities_actual"]
+        if actuals["utilities_actual"] is not None
+        else get_fixed_cost(config, store_id, "utilities_estimate")
+    )
 
-    rent = actuals["rent_actual"] if actuals["rent_actual"] is not None else fixed["rent"]
+    rent = actuals["rent_actual"] if actuals["rent_actual"] is not None else get_fixed_cost(config, store_id, "rent")
     franchise_amortization = (
         actuals["franchise_amortization_actual"]
         if actuals["franchise_amortization_actual"] is not None
-        else fixed["franchise_fee_amortization"]
+        else get_fixed_cost(config, store_id, "franchise_fee_amortization")
     )
 
     ubereats_pct = (
