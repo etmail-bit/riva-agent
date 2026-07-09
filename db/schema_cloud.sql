@@ -74,3 +74,18 @@ CREATE TABLE IF NOT EXISTS monthly_pnl (
     calculated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(store_id, year_month)
 );
+
+-- store_operational_insights（通路組合／客單價，含真實客單價金額）2026-07-09 使用者
+-- 決定不公開，刻意不放進雲端 schema。完整版只存在本機 db/riva_agent.db，供 app.py 用。
+--
+-- store_staffing_insights：欄位表面上看起來只是「一段結論文字」，但文字內容本身
+-- 可能藏著真實金額——2026-07-09 曾經誤把含真實人事成本的完整版同步上來過，發現後
+-- 已從 Turso 刪除。這裡的 summary_text 現在**只會被寫入公開安全版**（只有「預估可
+-- 節省金額」，見 scripts/migrate_layer2_to_turso.py 的 migrate_staffing_insights()
+-- 只讀本機表的 public_summary_text 欄位）——之後改這支同步腳本時要記得維持這個界線，
+-- 不要因為兩個欄位長得很像就查錯欄位。
+CREATE TABLE IF NOT EXISTS store_staffing_insights (
+    store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
+    summary_text TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);

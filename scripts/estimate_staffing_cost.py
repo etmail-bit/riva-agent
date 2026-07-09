@@ -203,9 +203,25 @@ def build_staffing_summary(s: dict) -> str:
     )
 
 
+def build_public_staffing_summary(s: dict) -> str:
+    """2026-07-09 使用者確認的公開範圍：只放「預估可節省金額」，不含真實人事成本／
+    固定薪資／實際排班時數這些底片數字。這個版本（不是 build_staffing_summary()
+    那個完整版）才是 migrate_layer2_to_turso.py 會同步上雲端的內容。"""
+    cons, aggr = s["scenarios"]["conservative"], s["scenarios"]["aggressive"]
+    return (
+        "排班分析：尖峰時段人力配置有調整空間，估計每月可節省變動成本，"
+        f"保守版（尖峰維持緩衝人力）約 {cons['avoidable_cost_per_day'] * 30:,.0f} 元，"
+        f"積極版（尖峰也砍到操作下限，風險較高，僅供參考）約 "
+        f"{aggr['avoidable_cost_per_day'] * 30:,.0f} 元。"
+    )
+
+
 def persist_staffing_insights(conn, stats_by_store: dict) -> None:
     """把濃縮結論寫進 store_staffing_insights，只有這張表存在時才寫
-    （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。"""
+    （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。
+    summary_text 是完整版（本機 app.py 專用，含真實人事成本等數字，不可同步上雲端）；
+    public_summary_text 是只放預估可節省金額的公開安全版（migrate_layer2_to_turso.py
+    只會同步這一欄）。"""
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='store_staffing_insights'"
     ).fetchone()
@@ -213,12 +229,16 @@ def persist_staffing_insights(conn, stats_by_store: dict) -> None:
         return
     for sid, s in stats_by_store.items():
         summary = build_staffing_summary(s)
+        public_summary = build_public_staffing_summary(s)
         conn.execute(
-            "INSERT INTO store_staffing_insights (store_id, summary_text, generated_at) "
-            "VALUES (?, ?, datetime('now')) "
+            "INSERT INTO store_staffing_insights "
+            "(store_id, summary_text, public_summary_text, generated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
             "ON CONFLICT(store_id) DO UPDATE SET "
-            "summary_text = excluded.summary_text, generated_at = excluded.generated_at",
-            (sid, summary),
+            "summary_text = excluded.summary_text, "
+            "public_summary_text = excluded.public_summary_text, "
+            "generated_at = excluded.generated_at",
+            (sid, summary, public_summary),
         )
     conn.commit()
 

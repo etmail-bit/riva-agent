@@ -203,19 +203,24 @@ CREATE TABLE monthly_pnl (
 -- 只存在本機、刻意不同步到雲端 Turso DB；這張表之後若要同步上雲端，只會送出聚合後的結論文字，
 -- 不會把逐筆發票/通路明細送上去。2026-07-09 使用者決定：先只在本機累積，何時同步上雲端另外處理，
 -- 所以目前刻意不加進 schema_cloud.sql。
+-- 通路組合／客單價／尖峰時段的濃縮結論，含真實客單價（元）與營收佔比 %，
+-- 屬於敏感財務數字，2026-07-09 使用者決定：只留在本機，不同步上雲端
+-- （不像 store_staffing_insights 有另外拆一份「公開安全版」，這張表沒有）。
 CREATE TABLE store_operational_insights (
     store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
     summary_text TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- scripts/estimate_staffing_cost.py 算出的「實際排班 vs 合理人力」結論快取，
--- 同一套「只存聚合結論、不存逐筆明細」的道理：raw_staffing_actual／員工薪資結構
--- 只存在本機。哪個店有這張表的資料，pnl_insights.py 的建議段落就用真實排班反推的
--- 結論；沒有的店（例如還沒謄打排班資料的店）繼續用原本的通用估計句子。
--- 2026-07-09 使用者決定：跟 store_operational_insights 一樣先只在本機累積。
+-- scripts/estimate_staffing_cost.py 算出的「實際排班 vs 合理人力」結論快取。
+-- 2026-07-09 使用者決定的公開範圍：只有「預估可節省金額」這一項可以同步上雲端
+-- （見 public_summary_text），真實人事成本／固定薪資／實際排班時數等底片數字
+-- 一律不公開，只留在 summary_text（本機專用，供 app.py 顯示完整版）。
+-- 哪個店有這張表的資料，pnl_insights.py 的建議段落就用真實排班反推的結論；
+-- 沒有的店（例如還沒謄打排班資料的店）繼續用原本的通用估計句子。
 CREATE TABLE store_staffing_insights (
     store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
     summary_text TEXT NOT NULL,
+    public_summary_text TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
