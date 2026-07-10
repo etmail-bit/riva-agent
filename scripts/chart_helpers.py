@@ -51,9 +51,10 @@ def build_trend_chart(chart_df, domain, color_range, height=300, y_field="金額
         series_data = chart_df[chart_df["項目"] == series_name]
         if series_data.empty:
             continue
+        dy = _LABEL_DY_OFFSETS[i % len(_LABEL_DY_OFFSETS)]
         layers.append(
             alt.Chart(series_data)
-            .mark_text(dy=_LABEL_DY_OFFSETS[i % len(_LABEL_DY_OFFSETS)], fontSize=10)
+            .mark_text(dy=dy, fontSize=10)
             .encode(
                 x=x_scale,
                 y=alt.Y(y_field_q),
@@ -61,5 +62,23 @@ def build_trend_chart(chart_df, domain, color_range, height=300, y_field="金額
                 color=color_scale,
             )
         )
+        # 圖例的顏色對照容易被忽略（尤其手機上圖例可能不顯眼），額外在每條線的
+        # 最後一個點旁邊直接寫上系列名稱（例如「營收」），不用對照圖例就知道每條線是什麼。
+        last_point = series_data.sort_values("year_month").tail(1)
+        layers.append(
+            alt.Chart(last_point)
+            .mark_text(dy=dy, dx=32, fontSize=11, fontWeight="bold", align="left")
+            .encode(
+                x=x_scale,
+                y=alt.Y(y_field_q),
+                text=alt.Text("項目:N"),
+                color=color_scale,
+            )
+        )
 
-    return alt.layer(*layers).properties(width=alt.Step(MONTH_STEP_PX), height=height)
+    # 系列名稱標籤畫在最後一個點的右邊（dx=32），如果不加右側留白，最後一個月份會
+    # 剛好卡在圖表邊界，名稱標籤被裁切看不全（實測過，例如「稅後淨利」四個字只露出一半）。
+    return (
+        alt.layer(*layers)
+        .properties(width=alt.Step(MONTH_STEP_PX), height=height, padding={"left": 5, "top": 5, "right": 70, "bottom": 5})
+    )
