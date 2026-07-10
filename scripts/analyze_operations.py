@@ -80,6 +80,68 @@ def invoice_stats(conn, store_id):
     }
 
 
+def repeat_customer_stats(conn, store_id):
+    """回頭客分析（2026-07-10 新增）。carrier_no（手機載具號碼）視同客戶個資等級的識別碼，
+    只在這裡當 GROUP BY 的內部 key 用，從頭到尾不把原始 carrier_no 存進回傳值或報告——
+    只回傳聚合後的統計數字（總客數、回訪分布、回頭客營收佔比），不留任何可以反查回
+    單一顧客的中間產物，符合零洩漏原則。"""
+    rows = conn.execute(
+        "SELECT carrier_no, substr(tx_time,1,10) AS biz_date, substr(tx_time,1,7) AS ym, amount "
+        "FROM raw_invoice_transactions WHERE store_id = ? AND tx_status = '正常' AND carrier_no IS NOT NULL",
+        (store_id,),
+    ).fetchall()
+    if not rows:
+        return None
+
+    visits, spend = {}, {}
+    by_month = {}
+    for r in rows:
+        visits.setdefault(r["carrier_no"], set()).add(r["biz_date"])
+        spend[r["carrier_no"]] = spend.get(r["carrier_no"], 0) + r["amount"]
+        by_month.setdefault(r["ym"], set()).add(r["carrier_no"])
+
+    total_customers = len(visits)
+    repeat_ids = {cid for cid, dates in visits.items() if len(dates) >= 2}
+    repeat_revenue = sum(spend[cid] for cid in repeat_ids)
+    total_revenue = sum(spend.values())
+
+    months_sorted = sorted(by_month)
+    seen = set()
+    monthly_trend = []  # [{year_month, returning_pct}, ...]，第一個月沒有歷史可比，returning_pct=None
+    for ym in months_sorted:
+        this_month = by_month[ym]
+        returning_pct = (len(this_month & seen) / len(this_month) * 100) if seen else None
+        monthly_trend.append({"year_month": ym, "returning_pct": returning_pct})
+        seen |= this_month
+    latest_returning_pct = monthly_trend[-1]["returning_pct"] if monthly_trend else None
+
+    bucket_labels = ["1次", "2次", "3~5次", "6~10次", "11次以上"]
+    visit_buckets = {label: 0 for label in bucket_labels}
+    for cid, dates in visits.items():
+        n = len(dates)
+        if n == 1:
+            visit_buckets["1次"] += 1
+        elif n == 2:
+            visit_buckets["2次"] += 1
+        elif n <= 5:
+            visit_buckets["3~5次"] += 1
+        elif n <= 10:
+            visit_buckets["6~10次"] += 1
+        else:
+            visit_buckets["11次以上"] += 1
+
+    return {
+        "total_customers": total_customers,
+        "repeat_pct": len(repeat_ids) / total_customers * 100,
+        "repeat_revenue_pct": (repeat_revenue / total_revenue * 100) if total_revenue else 0,
+        "latest_month": months_sorted[-1] if months_sorted else None,
+        "latest_returning_pct": latest_returning_pct,
+        "first_month": months_sorted[0] if months_sorted else None,
+        "visit_buckets": visit_buckets,
+        "monthly_trend": monthly_trend,
+    }
+
+
 def peak_hours(conn, store_id, top_n=5):
     rows = conn.execute(
         "SELECT hour_slot, AVG(daily_avg_sales) AS avg_sales, AVG(daily_avg_cups) AS avg_cups "
@@ -96,6 +158,7 @@ def _compute_all(conn, store_ids) -> dict:
             "mix": channel_mix(conn, sid),
             "inv": invoice_stats(conn, sid),
             "peaks": peak_hours(conn, sid),
+            "repeat": repeat_customer_stats(conn, sid),
         }
         for sid in store_ids
     }
@@ -105,12 +168,14 @@ def build_operational_summary(data: dict) -> str:
     """把單店的通路/客單價/尖峰時段數字濃縮成一兩句「結論」，供 pnl_insights.py
     的「各店經營現況」段落交叉引用。刻意只保留聚合統計（佔比/中位數/時段），
     不含逐筆明細，是唯一之後可能考慮同步上雲端的內容。"""
-    mix, inv, peaks = data["mix"], data["inv"], data["peaks"]
+    mix, inv, peaks, repeat = data["mix"], data["inv"], data["peaks"], data.get("repeat")
     parts = [f"通路組合上外送平台佔營收 {mix['delivery_pct']*100:.0f}%（會被抽 35% 佣金）"]
     if inv:
         parts.append(f"客單價中位數 {inv['median']:.0f} 元")
     if peaks:
         parts.append(f"尖峰時段集中在 {peaks[0][0]}:00 前後")
+    if repeat:
+        parts.append(f"回頭客佔客數 {repeat['repeat_pct']:.0f}%、貢獻營收 {repeat['repeat_revenue_pct']:.0f}%")
     return "，".join(parts) + "。"
 
 
@@ -148,6 +213,7 @@ def build_report(conn, store_ids, per_store: dict | None = None) -> str:
 
     for sid in store_ids:
         mix, inv, peaks = per_store[sid]["mix"], per_store[sid]["inv"], per_store[sid]["peaks"]
+        repeat = per_store[sid].get("repeat")
 
         lines.append(f"## {sid} 店")
         lines.append("")
@@ -168,6 +234,17 @@ def build_report(conn, store_ids, per_store: dict | None = None) -> str:
         if peaks:
             peak_desc = "、".join(f"{h}:00（平均 {s:.0f} 元／{c:.0f} 杯）" for h, s, c in peaks[:3])
             lines.append(f"- **尖峰時段**：{peak_desc}")
+        if repeat:
+            lines.append(
+                f"- **回頭客（2026-07-10 新增，用手機載具號碼識別，只算聚合統計，不留個人層級資料）**："
+                f"回頭客（2 次以上消費）佔客數 {repeat['repeat_pct']:.1f}%，"
+                f"但貢獻了 {repeat['repeat_revenue_pct']:.1f}% 的營收"
+                + (
+                    f"；{repeat['latest_month']} 這個月的客人裡，有 {repeat['latest_returning_pct']:.1f}% "
+                    f"是之前月份（最早從 {repeat['first_month']} 開始）就出現過的老客，這個比例逐月成長中"
+                    if repeat["latest_returning_pct"] is not None else ""
+                )
+            )
         lines.append("")
 
     if len(store_ids) > 1:
@@ -199,6 +276,14 @@ def build_report(conn, store_ids, per_store: dict | None = None) -> str:
             lines.append(
                 f"- 兩店尖峰時段高度重疊（{', '.join(sorted(common_peaks))} 點），"
                 "代表這幾個時段的產能瓶頸是兩店共通問題，不是單一店的個別狀況。"
+            )
+        repeat_a, repeat_b = per_store[a].get("repeat"), per_store[b].get("repeat")
+        if repeat_a and repeat_b:
+            lines.append(
+                f"- 兩店都是「少數回頭客貢獻多數營收」的結構：{a} 店回頭客佔客數 "
+                f"{repeat_a['repeat_pct']:.0f}%、貢獻營收 {repeat_a['repeat_revenue_pct']:.0f}%；"
+                f"{b} 店回頭客佔客數 {repeat_b['repeat_pct']:.0f}%、貢獻營收 "
+                f"{repeat_b['repeat_revenue_pct']:.0f}%。"
             )
         lines.append("")
 

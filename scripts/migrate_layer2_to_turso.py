@@ -120,14 +120,15 @@ def migrate_monthly_pnl(local, cloud):
         cloud.execute(
             """
             INSERT INTO monthly_pnl
-                (store_id, year_month, revenue, cogs, labor_cost, rent, utilities,
+                (store_id, year_month, revenue, cogs, material_waste, labor_cost, rent, utilities,
                  franchise_amortization, platform_commission, payment_processing_fee,
                  business_tax, pretax_profit, income_tax_estimate, net_profit,
                  revenue_source, calculated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(store_id, year_month) DO UPDATE SET
                 revenue = excluded.revenue,
                 cogs = excluded.cogs,
+                material_waste = excluded.material_waste,
                 labor_cost = excluded.labor_cost,
                 rent = excluded.rent,
                 utilities = excluded.utilities,
@@ -142,10 +143,11 @@ def migrate_monthly_pnl(local, cloud):
                 calculated_at = excluded.calculated_at
             """,
             (
-                r["store_id"], r["year_month"], r["revenue"], r["cogs"], r["labor_cost"],
-                r["rent"], r["utilities"], r["franchise_amortization"], r["platform_commission"],
-                r["payment_processing_fee"], r["business_tax"], r["pretax_profit"],
-                r["income_tax_estimate"], r["net_profit"], r["revenue_source"], r["calculated_at"],
+                r["store_id"], r["year_month"], r["revenue"], r["cogs"], r["material_waste"],
+                r["labor_cost"], r["rent"], r["utilities"], r["franchise_amortization"],
+                r["platform_commission"], r["payment_processing_fee"], r["business_tax"],
+                r["pretax_profit"], r["income_tax_estimate"], r["net_profit"],
+                r["revenue_source"], r["calculated_at"],
             ),
         )
     return len(rows)

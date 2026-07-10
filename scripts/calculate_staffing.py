@@ -2,8 +2,16 @@
 """自動排班建議：依時段占比的「日均杯數」換算每小時建議前場人力，並對照班別時間窗。
 
 核心公式：
-    每小時建議前場人力 = ceil(日均杯數 ÷ 單位產能)
-    外送單已經算在日均杯數裡（一杯就是一杯，不分內用外送），不會重複疊加人力。
+    每小時建議前場人力 = ceil(日均杯數 ÷ 單位產能 ＋ 外送人力消耗小時數)
+    外送人力消耗小時數 = 該時段日均外送單數 × 每單履約分鐘數 ÷ 60
+        （2026-07-10 使用者提醒修正：外送單如果是店家自己送，會抽走一個人力出去外送
+        fulfillment_minutes_per_order 分鐘，這段時間他沒辦法顧前場，不是「已經含在日均杯數裡
+        不用另外算」——之前這裡的假設是錯的，只有平台叫車外送（外部騎士取貨）才不會佔用店內人力，
+        店家自己的外送單（raw_hourly_pattern_monthly 的 delivery_count 欄位，跟 platform_count
+        平台單分開存）才需要另外扣人力）。
+    raw_hourly_pattern_monthly 的 delivery_count/platform_count 兩欄是「該月累計總數」，
+    不是日均值，要除以當月天數才是跟 daily_avg_cups 同一個量級的「日均外送單數」——
+    這是之前的既有 bug（這兩欄從來沒被拿來做過容量計算，只當參考欄印出來，所以沒被抓到）。
     煮茶班時段（預設 07:30 起 1 小時）該人力在後場煮茶，不計入前場產能，
     另外用「+1 煮茶」標註，煮完後併入前場支援。
 
@@ -14,6 +22,7 @@
     source .venv/bin/activate
     python3 scripts/calculate_staffing.py
 """
+import calendar
 import json
 import math
 import sqlite3
@@ -22,6 +31,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
 CONFIG_PATH = ROOT / "config" / "staffing_rules.json"
+
+
+def _days_in_month(year_month):
+    year, month = map(int, year_month.split("-"))
+    return calendar.monthrange(year, month)[1]
 
 
 def load_config():
@@ -45,7 +59,14 @@ def get_hourly_data(conn, store_id, year_month):
         """,
         (store_id, year_month),
     ).fetchall()
-    return {r["hour_slot"]: dict(r) for r in rows}
+    days = _days_in_month(year_month)
+    result = {}
+    for r in rows:
+        d = dict(r)
+        # delivery_count 存的是當月累計總數，除以當月天數才是跟 daily_avg_cups 同量級的日均值
+        d["daily_avg_delivery_count"] = (d["delivery_count"] or 0) / days
+        result[r["hour_slot"]] = d
+    return result
 
 
 def is_tea_brewing_hour(hour_slot, config):
@@ -70,31 +91,41 @@ def is_shift_active(hour_slot, shift, config):
     return start_minutes < window_end and end_minutes > window_start
 
 
+def calculate_delivery_hours(daily_avg_delivery_count, config):
+    """該時段外送單消耗掉的人力小時數（店家自己送的單，不含平台叫車外送）。"""
+    minutes_per_order = config["delivery"]["fulfillment_minutes_per_order"]
+    return daily_avg_delivery_count * minutes_per_order / 60
+
+
 def calculate_hourly_staffing(hourly_data, config):
     capacity = config["capacity"]["cups_per_staff_per_hour"]
     result = {}
     for hour_slot, data in hourly_data.items():
         cups = data["daily_avg_cups"] or 0
-        required = math.ceil(cups / capacity) if cups else 0
+        delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
+        required = math.ceil(cups / capacity + delivery_hours) if (cups or delivery_hours) else 0
         result[hour_slot] = {
             "cups": cups,
+            "delivery_hours": round(delivery_hours, 2),
             "required_front_staff": required,
             "tea_brewing": is_tea_brewing_hour(hour_slot, config),
-            "delivery_count": data["delivery_count"] or 0,
+            "delivery_count": round(data["daily_avg_delivery_count"], 2),
         }
     return result
 
 
 def print_report(store_id, year_month, staffing, config):
     print(f"\n=== {store_id} 店 {year_month} ===")
-    print(f"{'時段':<6}{'日均杯數':>8}{'建議前場人力':>12}{'煮茶':>6}{'外送單':>6}")
+    print(f"{'時段':<6}{'日均杯數':>8}{'建議前場人力':>12}{'煮茶':>6}{'日均外送單':>10}{'外送耗時(hr)':>12}")
     for hour_slot in sorted(staffing.keys()):
         s = staffing[hour_slot]
         tea_flag = "煮茶" if s["tea_brewing"] else ""
         print(
-            f"{hour_slot:<6}{s['cups']:>8}{s['required_front_staff']:>12}{tea_flag:>6}{s['delivery_count']:>6}"
+            f"{hour_slot:<6}{s['cups']:>8}{s['required_front_staff']:>12}{tea_flag:>6}"
+            f"{s['delivery_count']:>10}{s['delivery_hours']:>12}"
         )
     print("（「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能）")
+    print("（「建議前場人力」已經把外送耗時併進需求裡：ceil(杯數/產能 + 外送耗時小時數)）")
 
     print(f"\n班別對照（單位產能 {config['capacity']['cups_per_staff_per_hour']} 杯/人/hr）：")
     for shift in config["shifts"]:
@@ -108,9 +139,8 @@ def print_report(store_id, year_month, staffing, config):
             f"時段內尖峰需求 {peak} 人，平均需求 {avg:.1f} 人"
         )
 
-    # 外送單量已經包含在「日均杯數」裡（一杯就是一杯，不分內用外送），只要前場人力配到位，
-    # 出杯速度自然在 SLA 內，不需要另外疊加一個獨立的外送壓力公式——之前版本試過會對幾乎
-    # 每個時段誤報，是校準錯誤，拿掉了。外送單量欄位保留在表格裡純供參考。
+    # 2026-07-10 更新：外送單（店家自己送）會抽走一個人力出去外送，已經併進上面的
+    # required_front_staff 公式（calculate_delivery_hours），不再是只當參考的欄位。
 
 
 def main():

@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS monthly_pnl (
     year_month TEXT NOT NULL,
     revenue INTEGER NOT NULL,
     cogs INTEGER NOT NULL,
+    material_waste INTEGER NOT NULL DEFAULT 0,
     labor_cost INTEGER NOT NULL,
     rent INTEGER NOT NULL,
     utilities INTEGER NOT NULL,

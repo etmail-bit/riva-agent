@@ -135,7 +135,7 @@ def generate_monthly_breakdown(conn, store_id) -> list:
     """回傳這店逐月的成本結構（占營收 %），一個月一筆 dict，方便逐月比較找盈虧原因。
     百分比欄位而非金額欄位，才能跨月份（營收規模不同）直接比較。"""
     rows = conn.execute(
-        "SELECT year_month, revenue, cogs, labor_cost, rent, utilities, "
+        "SELECT year_month, revenue, cogs, material_waste, labor_cost, rent, utilities, "
         "platform_commission, pretax_profit, net_profit "
         "FROM monthly_pnl WHERE store_id = ? ORDER BY year_month",
         (store_id,),
@@ -150,6 +150,7 @@ def generate_monthly_breakdown(conn, store_id) -> list:
             "月份": row["year_month"],
             "營收": revenue,
             "原物料%": pct(row["cogs"]),
+            "原物料損耗%": pct(row["material_waste"]),
             "人事%": pct(row["labor_cost"]),
             "房租%": pct(row["rent"]),
             "水電%": pct(row["utilities"]),

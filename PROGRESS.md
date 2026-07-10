@@ -311,6 +311,81 @@ Layer 3（分析產出）
 
 **通用教訓（已記錄進 memory 的 feedback，跨專案適用）**：判斷「能不能公開」不能只看資料表欄位設計，要連**自由文字欄位裡實際寫了什麼內容**都要逐一檢查——欄位名稱叫「摘要」「結論」不代表內容一定安全，尤其是這種「目的就是要講出具體數字」的分析型文字。
 
-## 這次對話最後在討論的方向
+## 逐時段落差明細＋正職/兼職拆分（2026-07-09 完成，供下次對話討論人力配置優化）
 
-排班瓶頸分析已量化成保守/積極兩版方案，寫進 `estimate_staffing_cost.py` 的固定報告邏輯，且只有「預估可節省金額」同步上雲端。下一步候選（尚未定案）：① B 店排班原始資料謄打進來後重跑分析，看瓶頸模式是否一致；② 決定要不要把保守版班表提案實際排進現場（現在只是分析建議，還沒有變成排班表）。若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。
+在上面「排班瓶頸分析」的彙整數字之外，使用者要求要能「逐時段」驗證，不能只給一個加總後的數字。`estimate_staffing_cost.py` 新增 `hourly_breakdown()`，每個時段列出：杯量、實際平均人力（拆成正職／兼職兩欄）、保守/積極版合理人力、落差。過程中有兩次方法論修正，都是使用者當場糾正的：
+
+1. **休息時間該不該扣**：第一版想把班表區間裡的無薪休息時間（真實時數跟起訖區間的差額，例如 8.5 小時的班只算 8 小時）平均分攤到整班每小時，讓逐時段數字更「精確」跟彙整數字對得起來。使用者指出這樣不直覺、也不合理——沒有人會挑尖峰時段休息，均勻分攤等於連尖峰都被扣產能。改良版試過「休息優先放在最閒的時段」，仍然是使用者最後拍板：**乾脆不要猜休息時間，班表寫幾點到幾點就算幾個人**，跟「排班建議」頁本來的算法（`compare_staffing.py` 的 `calculate_actual_hourly_average()`）一致，只是因此逐時段加總會比彙整表的「可省成本」略高（差額約等於休息時數），這個差異已經寫進報告的說明文字裡，不是算錯。
+2. **正職/兼職要分開看**：新增 `actual_hourly_average_by_role()`，依 `config/staffing_rules.json` 的 `employee_roles` 分組。第一版用「重疊分鐘數比例」算，導致正職＋兼職加總對不起「實際平均人力」欄位；修正成跟 `calculate_actual_hourly_average()` 同一套算法（只要班表跟該時段有重疊就算滿 1 人），兩者才能剛好加總一致（只有四捨五入造成的 0.01 誤差）。
+
+**看出來的初步規律（具體數字不記錄在此檔案，屬真實營運數字，見零洩漏原則，可從 `reports/staffing_cost_estimate_<日期>.md` 或網頁查詢）**：正職人力幾乎整天維持平穩、沒有隨時段明顯調整；超編的落差主要是兼職／加班在填，而且晚間時段（18 點後）兼職占比明顯升高。換句話說，超編不完全是「請太多人」，比較像是**正職班表本身沒有彈性、用兼職補洞**——這正是使用者想另開新對話深入討論的「人力配置優化」切入點。
+
+**下次對話可以延續的方向（尚未定案，供接手參考）**：
+- 正職班表要不要重新設計出更貼近需求曲線的班別（例如錯開起訖時間），而不是靠兼職／加班補洞
+- 兼職排班有 `config/staffing_rules.json` 的 `part_time.min_hours=3` 下限，任何新提案的兼職班次都要符合
+- B 店排班原始資料還沒謄打進來，只有 A 店可以做這個層級的分析
+- **`scripts/estimate_staffing_cost.py` 目前有未 commit 的異動**（逐時段明細＋正職/兼職拆分功能），下次對話開始前可以先確認要不要 commit + push（純程式邏輯，不含真實數字，可安全公開）
+
+若開新對話，這份文件加上 memory 裡的 `project-roadmap-v1` 應該足以還原上下文。
+
+## 人力配置優化：平日/假日拆分＋外送人力抽離（2026-07-10 完成）
+
+延續上一節「正職班表沒彈性、靠兼職補洞」的討論，這次對話深入拆解到「平日/假日」層級，並修正了一個容量計算的既有缺口。
+
+**資料補齊**：使用者補上 A 店 2026-01~06（02月過年排除）逐一星期六/日的**真實**時段占比報表（放在新資料夾 `data/raw/週末時段占比/`），以及 A 店 5、6、7月排班照片的謄打資料（`data/staffing_actual_raw.csv` 擴充到 2026-05-01~07-09，70天）。過程中用「內容比對」（而非檔名）抓到 6 個重複匯出的檔案，已排除；另抓到一筆真實異常值（單一天某時段杯數突出），使用者確認排除不列入計算。新員工「毅」（只在5月排班出現過）已建代碼並設為兼職角色。
+
+**核心發現（具體數字不記錄在此檔案，屬真實營運數字，見零洩漏原則，可從 `reports/` 或網頁查詢）**：用真實假日杯數 + 月彙總杯數代數反推平日均，發現**平日全天稼働率沒有任何時段逼近2人產能上限，假日中午到下午則有多個時段逼近甚至超過上限**。這推翻了原本「尖峰時段（11-14點）不分平日假日都要加開兼職」的假設——實際上是**假日才真正需要加開兼位，平日的常態加開站不住腳**。`config/staffing_rules.json` 的 `scenario` 已新增 `weekday_peak_hours`／`weekend_peak_hours` 兩個欄位記錄這個結論，供人工排班參考（尚未接進 `calculate_staffing.py`／`estimate_staffing_cost.py` 的自動計算，因為杯數資料源頭本身還是月彙總、無法自動判斷平日假日）。
+
+**外送人力抽離公式修正（重要）**：使用者提醒「外送單（店家自己送，非平台叫車）每單會抽走一個人力出去送，需要另外扣人力」，原本 `calculate_staffing.py` 假設外送單「已含在日均杯數裡，不用另外算」是錯的。已修正：
+1. 修好一個既有 bug——`raw_hourly_pattern_monthly` 的 `delivery_count`／`platform_count` 兩欄存的是「當月累計總數」，不是日均值，之前只當參考欄印出來所以沒被抓到，現在要拿來做容量計算，已改成除以當月天數。
+2. `calculate_staffing.py` 新增 `calculate_delivery_hours()`，`估計人力 = ceil(杯數/產能 + 外送單數×履約分鐘數/60)`，`estimate_staffing_cost.py` 的 `_required_staff_per_hour()` 共用同一個函式。兩支程式跟 `app.py` 排班頁都已測試正常運作。
+3. **使用者口頭估計「每日約12單」，但系統實測的真實外送單數明顯低於這個數字**，原因未知（可能有電話叫貨等訂單沒被系統正確歸類進「外送」欄位）。目前公式採用系統實測的真實數字，這個落差記在 `config/staffing_rules.json` 的 `delivery.note`，之後需要使用者確認差距原因。
+
+## 月盈虧新增「原物料損耗」成本線（2026-07-10 完成）
+
+使用者以經理人角度檢視盈虧改善方向時，指示先用「原物料成本的 4%」概算原物料損耗/報廢（過期、備料超量、給料誤差等，目前無實際盤點數字）。已完成：
+
+1. `monthly_pnl` 資料表新增 `material_waste` 欄位（`db/schema.sql`／`db/schema_cloud.sql`／實際 `db/riva_agent.db` 都已同步 ALTER）
+2. `config/cost_rates.json` 新增 `material_waste_pct`（`.example.json` 同步更新範本）
+3. `calculate_pnl.py` 的核心公式在「原物料」之後、「平台抽成」之前新增這條扣除線（`material_waste = cogs × material_waste_pct`），`save_pnl_result()`／`app.py`／`app_pnl.py` 的成本瀑布圖／`pnl_insights.py` 的逐月成本結構表都同步顯示這一項
+4. `scripts/migrate_layer2_to_turso.py` 的 `migrate_monthly_pnl()` 欄位清單同步更新（**尚未實際跑同步，Turso 上的 `monthly_pnl` 表結構也需要之後另外 ALTER 才能接住新欄位**，云端部署的 `COST_RATES_JSON` Secret 之後也要記得補上 `material_waste_pct`，不然雲端版試算不會套用這項）
+5. 已重新執行 `calculate_pnl.py`，20 筆歷史月份（兩店各10個月）都已重算納入這條新成本線，`monthly_pnl` 是既有紀錄會被覆蓋更新，不是新增獨立紀錄
+
+**待確認**：使用者同時提到「平台抽成35%」的疑問，經確認 `config/cost_rates.json` 的 `platform_commission.ubereats/foodpanda` 本來就已經是這個真實費率、且已經在 `calculate_pnl.py` 裡實際套用在真實的 `ubereats_amount`/`foodpanda_amount`（來自 `raw_cash_register_daily`）——**這項不是缺口，是先前已經做好的部分，這次分析報告把它誤列為「還需要的資料」，屬於分析過度謹慎，已跟使用者澄清**。
+
+## 排班平日/假日分析正式落地成網頁功能＋回頭客分析上網頁（2026-07-10 完成）
+
+使用者確認「外送來客數」時段占比報表就是真實資料（不是使用者口頭估的12單/天），公式維持用系統實測值；接著指示把上面兩節的分析正式做成網頁功能，並把回頭客分析也放上網頁——**使用者明確表示總部已經有集點/會員制度，不需要另外設計會員方案，這次只上「發現」不做「行動方案」**。
+
+**新增 `raw_hourly_pattern_daily` 資料表**（`db/schema.sql`／實際 db 都已建表）：存單一天（非月彙總）的時段占比樣本，目前只有 A 店的星期六/日抽樣。`scripts/import_hourly_pattern_daily.py` 負責匯入 `data/raw/週末時段占比/` 底下的檔案，從檔名「第N個星期六/天」+ 該月行事曆算出真實 `business_date`（假設檔名序號照日期排序），一樣用「內容比對」去重複。原本臨時分析裡發現的異常值（2026-05-02 14點的杯數）已直接從這張表刪掉那一格（不是在分析程式裡加排除清單），源頭乾淨，下游不用再處理。
+
+**新增 `scripts/analyze_staffing_daytype.py`**：把之前臨時寫的分析整理成正式模組，`cup_stats_by_daytype()`／`roster_mode_by_weekday()` 兩個函式供 CLI 跟 `app.py` 共用。
+
+**`app.py` 排班建議頁新增兩個區塊**：「平日/假日逐時段杯數」「星期幾 x 時段實際排班人力（正職/兼職眾數）」，都在原有的「班別彙總」跟「實際排班 vs 建議人力比對」中間，B 店目前沒有這兩塊資料時會顯示提示訊息、不會噴錯。
+
+**過程中抓到並修好一個既有 bug**：`render_staffing_page()` 原本用一個手寫的最小 dict 當 `working_config`（只有 `capacity`/`tea_brewing`/`shifts` 三個 key），這次要讀 `employee_roles`（給 `roster_mode_by_weekday` 用）跟 `delivery`（給稍早新增的外送耗時公式用）時直接 `KeyError`。已改成 `copy.deepcopy(saved_config)` 再覆寫 UI 可調欄位，比照月盈虧頁本來就用的模式，兩頁現在做法一致。已用 Playwright 實測登入排班建議頁確認兩個新區塊正確顯示、且原有的「實際排班 vs 建議人力比對」沒有壞掉；B 店測過 `cup_stats_by_daytype()`/`roster_mode_by_weekday()` 直接呼叫回傳空結果、不噴錯。**測試過程中用 `manage_accounts.py` 暫時重設了 `demo_admin` 的密碼做登入驗證，使用者需要自己重設回想要的密碼。**
+
+**`scripts/analyze_operations.py` 新增回頭客分析**：`repeat_customer_stats()` 用 `carrier_no` 算聚合統計（回頭客佔比、回頭客營收貢獻、逐月老客比例趨勢），比照既有函式的模式，只回傳聚合數字、不留任何個人層級資料。已接進 `build_report()`（單店段落＋兩店比較段落）跟 `build_operational_summary()`（給 `store_operational_insights` 交叉引用），`app.py` 的「彙整」頁本來就會載入最新的 `operational_report_*.md`，不用另外接線就會顯示。已用 CLI 跟 Playwright（彙整頁）都測過正常顯示。
+
+**Excel 匯出**：`reports/staffing_daytype_summary_2026-07-10.xlsx`（本機限定），供使用者離線參考；這份是分析正式落地成網頁功能之前的過渡產物，之後網頁本身就能查看，不用再另外匯出 Excel。
+
+## 建立 `monthly-ops-refresh` skill（2026-07-10 完成）
+
+使用者要求把「每個月拿到新一批 POS 檔案→產出報告」這整套流程做成 skill，用 `skill-creator` 建立。位置：`.claude/skills/monthly-ops-refresh/`（`SKILL.md` + `references/pipeline_steps.md` + `references/zero_leakage_gates.md`），已加進 `.gitignore`（順便發現 `.claude/skills/` 之前沒被任何規則排除到，`.claude/settings.local.json`／`scheduled_tasks.lock` 是靠全域 gitignore 排除，這次補上專案層級的明確排除，不再只靠全域設定）。
+
+Skill 內容涵蓋：完整 Layer 1→2→3 管線執行順序、排班照片謄打的信心分級規則、既有踩過的資料品質陷阱（檔名標錯月份、內容重複檔等）、零洩漏鐵則（**雲端同步 `migrate_layer2_to_turso.py` 絕對不能自己決定要不要跑，一定要當次明確經使用者同意**，附這個專案真實踩過的洩漏案例當「為什麼」）。使用者確認先不用跑正式的 eval/benchmark 流程，直接看草稿內容確認即可（skill-creator 本身支援這種輕量模式）。
+
+**跟使用者確認繁體中文一致性**：檢查時發現 `SKILL.md` 的 frontmatter `description` 欄位原本寫成英文，跟 skill 本文與其他所有溝通不一致，已改成繁體中文（`name` 欄位維持技術識別碼慣例，保留小寫連字號格式）。確認之後這個專案所有溝通與 skill 內容都用繁體中文製作。
+
+## 彙整頁圖表化＋新增「時段人力與杯數」獨立頁面（2026-07-10 完成）
+
+使用者反饋「彙整頁的營運報告都是文字說明，圖表比較好懂」，同意後做了三個圖表（都在「彙整」頁，用真實資料即時算，不是讀寫死的報告文字）：
+1. **通路組合長條圖**（外送平台 vs 自取/外帶佔營收 %，兩店並排比較）
+2. **回訪次數分布長條圖**（1次/2次/3~5次/6~10次/11次以上，佔客數 % ，兩店並排比較）
+3. **回頭客佔比逐月成長趨勢折線圖**（沿用既有的 `chart_helpers.build_trend_chart()`，這次順便把這支共用函式的 y 軸欄位/標題/數字格式改成可傳參數，預設值維持跟原本金額走勢圖一樣，向後相容）
+
+`scripts/analyze_operations.py` 的 `repeat_customer_stats()` 為此新增兩個回傳欄位：`visit_buckets`（回訪次數分布）跟 `monthly_trend`（逐月回訪比例明細，之前只回傳最新一個月的數字，現在回傳整個月份序列給圖表用）。
+
+**新增獨立頁面「時段人力與杯數」**（跟「月盈虧」「排班建議」同一層級的網頁選單項目，admin/staff 都看得到）：把原本埋在「排班建議」頁裡的「平日/假日逐時段杯數」跟「星期幾 x 時段實際排班人力（正職/兼職眾數）」兩個區塊搬出來獨立成一頁，讓「排班建議」頁專注在參數調整＋建議人力＋比對，這頁專注在純觀察用的實際資料。
+
+已用 Playwright 實測「彙整」頁三個圖表跟「時段人力與杯數」頁都正確顯示、無錯誤。這次的新增內容也同步補進 `monthly-ops-refresh` skill 的 `SKILL.md`（第 5 步「網頁自動反映」）跟 `references/pipeline_steps.md`（`analyze_operations.py` 函式被 CLI 報告跟網頁圖表共用的說明）。

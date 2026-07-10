@@ -2,8 +2,9 @@
 """月盈虧計算程式：依 config/cost_rates.json 的費率與 monthly_cost_actuals 的實際數字，
 把 Layer 2 資料算成 monthly_pnl。
 
-計算順序（2026-07 與使用者確認）：
-    營收 − 原物料 − 平台抽成（Ubereats/Foodpanda）− 金流手續費（信用卡/其他電子支付）
+計算順序（2026-07 與使用者確認，2026-07-10 新增原物料損耗一項）：
+    營收 − 原物料 − 原物料損耗（cogs × material_waste_pct，還沒有實際盤點數字，先用概算率）
+      − 平台抽成（Ubereats/Foodpanda）− 金流手續費（信用卡/其他電子支付）
       − 人事（底薪 × 1.196，底薪來源是 monthly_cost_actuals.labor_actual 或 config 概算值，
               不管來源是哪個都要乘 1.196 雇主保費負擔率）
       − 房租 − 水電 − 加盟金攤提 − 營業稅（只算「應稅」部分 × 5%，不是全部營收）
@@ -147,6 +148,7 @@ def calculate_one(conn, config, store_id, year_month):
     rates = config["variable_cost_rates"]
 
     cogs = actuals["cogs_actual"] if actuals["cogs_actual"] is not None else round(revenue * rates["cogs_pct_of_revenue"])
+    material_waste = round(cogs * rates.get("material_waste_pct", 0))
 
     labor_base = (
         actuals["labor_actual"]
@@ -208,6 +210,7 @@ def calculate_one(conn, config, store_id, year_month):
     pretax_profit = (
         revenue
         - cogs
+        - material_waste
         - platform_commission
         - payment_processing_fee
         - labor_cost
@@ -222,6 +225,7 @@ def calculate_one(conn, config, store_id, year_month):
     return {
         "revenue": revenue,
         "cogs": cogs,
+        "material_waste": material_waste,
         "labor_cost": labor_cost,
         "rent": rent,
         "utilities": utilities,
@@ -242,13 +246,14 @@ def save_pnl_result(conn, store_id, year_month, result):
     conn.execute(
         """
         INSERT INTO monthly_pnl
-            (store_id, year_month, revenue, cogs, labor_cost, rent, utilities,
+            (store_id, year_month, revenue, cogs, material_waste, labor_cost, rent, utilities,
              franchise_amortization, platform_commission, payment_processing_fee,
              business_tax, pretax_profit, income_tax_estimate, net_profit, revenue_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(store_id, year_month) DO UPDATE SET
             revenue = excluded.revenue,
             cogs = excluded.cogs,
+            material_waste = excluded.material_waste,
             labor_cost = excluded.labor_cost,
             rent = excluded.rent,
             utilities = excluded.utilities,
@@ -267,6 +272,7 @@ def save_pnl_result(conn, store_id, year_month, result):
             year_month,
             result["revenue"],
             result["cogs"],
+            result["material_waste"],
             result["labor_cost"],
             result["rent"],
             result["utilities"],

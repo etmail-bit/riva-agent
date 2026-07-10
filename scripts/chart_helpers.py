@@ -22,25 +22,27 @@ _LABEL_DY_OFFSETS = [-12, 14, 30, 46]
 MONTH_STEP_PX = 70
 
 
-def build_trend_chart(chart_df, domain, color_range, height=300):
-    """chart_df 欄位需為 year_month／項目／金額。domain/color_range 是圖例類別跟
-    顏色，順序要對齊。回傳一個 alt.LayerChart，每個資料點都標數值，X 軸固定間隔
-    （月份一多圖表變寬，不會擠壓）。呼叫端記得搭配
-    `st.altair_chart(chart, use_container_width=False)`，不要用容器寬度硬壓縮。"""
+def build_trend_chart(chart_df, domain, color_range, height=300, y_field="金額", y_title="金額（TWD）", value_format=","):
+    """chart_df 欄位需為 year_month／項目／<y_field>（預設「金額」，可傳其他欄位名稱
+    給非金額的走勢圖用，例如百分比指標）。domain/color_range 是圖例類別跟顏色，順序
+    要對齊。回傳一個 alt.LayerChart，每個資料點都標數值，X 軸固定間隔（月份一多圖表
+    變寬，不會擠壓）。呼叫端記得搭配 `st.altair_chart(chart, use_container_width=False)`，
+    不要用容器寬度硬壓縮。"""
     color_scale = alt.Color(
         "項目:N",
         scale=alt.Scale(domain=domain, range=color_range),
         legend=alt.Legend(title=None),
     )
     x_scale = alt.X("year_month:N", title="月份", scale=alt.Scale(paddingOuter=0.3))
+    y_field_q = f"{y_field}:Q"
     line = (
         alt.Chart(chart_df)
         .mark_line(point=alt.OverlayMarkDef(filled=True, size=60), strokeWidth=2)
         .encode(
             x=x_scale,
-            y=alt.Y("金額:Q", title="金額（TWD）"),
+            y=alt.Y(y_field_q, title=y_title),
             color=color_scale,
-            tooltip=["year_month", "項目", "金額"],
+            tooltip=["year_month", "項目", y_field],
         )
     )
 
@@ -54,8 +56,8 @@ def build_trend_chart(chart_df, domain, color_range, height=300):
             .mark_text(dy=_LABEL_DY_OFFSETS[i % len(_LABEL_DY_OFFSETS)], fontSize=10)
             .encode(
                 x=x_scale,
-                y=alt.Y("金額:Q"),
-                text=alt.Text("金額:Q", format=","),
+                y=alt.Y(y_field_q),
+                text=alt.Text(y_field_q, format=value_format),
                 color=color_scale,
             )
         )

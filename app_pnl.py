@@ -549,6 +549,7 @@ def render_pnl_page() -> None:
         [
             ("營收", result["revenue"]),
             ("原物料（含包材）", -result["cogs"]),
+            ("原物料損耗", -result["material_waste"]),
             ("平台抽成", -result["platform_commission"]),
             ("金流手續費", -result["payment_processing_fee"]),
             ("人事（含勞健保）", -result["labor_cost"]),

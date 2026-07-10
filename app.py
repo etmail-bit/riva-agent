@@ -20,6 +20,8 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 
+from scripts.analyze_operations import channel_mix, repeat_customer_stats
+from scripts.analyze_staffing_daytype import cup_stats_by_daytype, roster_mode_by_weekday
 from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data, is_shift_active
@@ -221,6 +223,84 @@ def render_combined_pnl_page(conn: sqlite3.Connection, stores: list[str]) -> Non
     sum_cols = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
     table_records = add_total_row(table_records, "月份", sum_cols)
     st.dataframe(pd.DataFrame(table_records), hide_index=True, use_container_width=True)
+
+    st.subheader("通路組合／回頭客分析（2026-07-10 新增圖表）")
+    store_color_range = [CHART_COLOR_NET_PROFIT, CHART_COLOR_STORE_B_NET_PROFIT][: len(stores)]
+    store_color_scale = alt.Scale(domain=stores, range=store_color_range)
+
+    mix_rows = []
+    repeat_data = {}
+    for sid in stores:
+        mix = channel_mix(conn, sid)
+        mix_rows.append({"店別": sid, "通路": "外送平台", "佔比": round(mix["delivery_pct"] * 100, 1)})
+        mix_rows.append({"店別": sid, "通路": "自取/外帶", "佔比": round(mix["pickup_pct"] * 100, 1)})
+        if mix["other_pct"] > 0.005:
+            mix_rows.append({"店別": sid, "通路": "其他", "佔比": round(mix["other_pct"] * 100, 1)})
+        repeat = repeat_customer_stats(conn, sid)
+        if repeat:
+            repeat_data[sid] = repeat
+
+    col_mix, col_visit = st.columns(2)
+    with col_mix:
+        st.caption("通路組合（佔營收 %）")
+        mix_chart = (
+            alt.Chart(pd.DataFrame(mix_rows))
+            .mark_bar()
+            .encode(
+                x=alt.X("通路:N", title=None),
+                y=alt.Y("佔比:Q", title="佔營收 %"),
+                color=alt.Color("店別:N", scale=store_color_scale, legend=alt.Legend(title=None)),
+                xOffset="店別:N",
+                tooltip=["店別", "通路", "佔比"],
+            )
+            .properties(height=280)
+        )
+        st.altair_chart(mix_chart, use_container_width=True)
+
+    with col_visit:
+        st.caption("回訪次數分布（佔客數 %）")
+        if repeat_data:
+            bucket_labels = ["1次", "2次", "3~5次", "6~10次", "11次以上"]
+            visit_rows = [
+                {
+                    "店別": sid,
+                    "回訪次數": label,
+                    "佔客數": round(r["visit_buckets"][label] / r["total_customers"] * 100, 1),
+                }
+                for sid, r in repeat_data.items()
+                for label in bucket_labels
+            ]
+            visit_chart = (
+                alt.Chart(pd.DataFrame(visit_rows))
+                .mark_bar()
+                .encode(
+                    x=alt.X("回訪次數:N", title=None, sort=bucket_labels),
+                    y=alt.Y("佔客數:Q", title="佔客數 %"),
+                    color=alt.Color("店別:N", scale=store_color_scale, legend=alt.Legend(title=None)),
+                    xOffset="店別:N",
+                    tooltip=["店別", "回訪次數", "佔客數"],
+                )
+                .properties(height=280)
+            )
+            st.altair_chart(visit_chart, use_container_width=True)
+        else:
+            st.caption("目前沒有回頭客資料（需要發票明細有留手機載具號碼）。")
+
+    if repeat_data:
+        st.caption("回頭客佔比逐月成長趨勢（這個月的客人裡，有多少比例是之前月份就出現過的老客）")
+        trend_rows = [
+            {"year_month": row["year_month"], "項目": sid, "回訪比例": round(row["returning_pct"], 1)}
+            for sid, r in repeat_data.items()
+            for row in r["monthly_trend"]
+            if row["returning_pct"] is not None
+        ]
+        if trend_rows:
+            trend_chart = build_trend_chart(
+                pd.DataFrame(trend_rows), stores, store_color_range,
+                height=260, y_field="回訪比例", y_title="回訪比例（%）", value_format=".1f",
+            )
+            st.altair_chart(trend_chart, use_container_width=False)
+        st.caption("只有「這個月之前已經有至少一個月的歷史資料」才算得出回訪比例，第一個月沒有歷史可比、不會出現在圖上。")
 
     st.subheader("營運報告（發票／營收／收銀機明細分析）")
     report = load_latest_operational_report()
@@ -554,6 +634,7 @@ def render_pnl_page() -> None:
         [
             ("營收", result["revenue"]),
             ("原物料（含包材）", -result["cogs"]),
+            ("原物料損耗", -result["material_waste"]),
             ("平台抽成", -result["platform_commission"]),
             ("金流手續費", -result["payment_processing_fee"]),
             ("人事（含勞健保）", -result["labor_cost"]),
@@ -668,11 +749,11 @@ def render_staffing_page() -> None:
         shifts_df, num_rows="dynamic", hide_index=True, use_container_width=True, key="shifts_editor"
     )
 
-    working_config = {
-        "capacity": {"cups_per_staff_per_hour": capacity},
-        "tea_brewing": {"start_time": tea_start, "estimated_duration_hours": tea_duration},
-        "shifts": edited_shifts_df.to_dict("records"),
-    }
+    working_config = copy.deepcopy(saved_config)
+    working_config["capacity"]["cups_per_staff_per_hour"] = capacity
+    working_config["tea_brewing"]["start_time"] = tea_start
+    working_config["tea_brewing"]["estimated_duration_hours"] = tea_duration
+    working_config["shifts"] = edited_shifts_df.to_dict("records")
 
     if st.button("儲存為新的預設值"):
         saved_config["capacity"]["cups_per_staff_per_hour"] = capacity
@@ -699,12 +780,16 @@ def render_staffing_page() -> None:
             "日均杯數": staffing[hour_slot]["cups"],
             "建議前場人力": staffing[hour_slot]["required_front_staff"],
             "煮茶": "煮茶 +1" if staffing[hour_slot]["tea_brewing"] else "",
-            "外送單（參考）": staffing[hour_slot]["delivery_count"],
+            "日均外送單": staffing[hour_slot]["delivery_count"],
+            "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
         }
         for hour_slot in sorted(staffing.keys())
     ]
     st.dataframe(pd.DataFrame(hourly_rows), hide_index=True, use_container_width=True)
-    st.caption("「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能")
+    st.caption(
+        "「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能。"
+        "「建議前場人力」已經把外送耗時併進需求：ceil(杯數/產能 + 外送耗時小時數)"
+    )
 
     st.subheader("班別彙總")
     summary_rows = []
@@ -787,6 +872,63 @@ def render_staffing_page() -> None:
     st.caption("「實際平均人力」的分母只算「已經有謄打排班資料的天數」，資料補齊前不代表整月狀況")
 
 
+def render_hourly_pattern_page() -> None:
+    """專門看『各時段人力和杯數』的頁面（2026-07-10 新增），從排班建議頁搬出來獨立
+    成一頁，避免排班建議頁（參數調整＋建議人力＋比對）跟這裡的純觀察資料混在一起。"""
+    conn = get_db_connection()
+    saved_config = load_staffing_config()
+
+    stores = [
+        r["store_id"]
+        for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()
+    ]
+    store_id = st.selectbox("店別", stores, format_func=lambda s: f"{s} 店")
+
+    st.subheader("平日/假日逐時段杯數")
+    all_months = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly WHERE store_id = ? ORDER BY 1",
+            (store_id,),
+        ).fetchall()
+    ]
+    daytype_stats = cup_stats_by_daytype(conn, store_id, all_months)
+    if not daytype_stats["平日"] and not daytype_stats["假日"]:
+        st.info(
+            f"{store_id} 店目前沒有 raw_hourly_pattern_daily 樣本（需要使用者額外提供逐一星期六/日的"
+            "時段占比報表，見 scripts/import_hourly_pattern_daily.py），無法拆分平日/假日。"
+        )
+    else:
+        col_wd, col_we = st.columns(2)
+        with col_wd:
+            st.caption("平日（反推值，用真實假日樣本 + 真實月彙總代數反推）")
+            st.dataframe(pd.DataFrame(daytype_stats["平日"]), hide_index=True, use_container_width=True)
+        with col_we:
+            st.caption("假日（真實樣本平均，非估計值）")
+            st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
+        st.caption(
+            "「月數」是有真實假日樣本可以反推的月份數，不是所有已匯入月份都會出現在這裡。"
+        )
+
+    st.subheader("星期幾 x 時段實際排班人力（正職/兼職眾數）")
+    date_range_row = conn.execute(
+        "SELECT MIN(business_date), MAX(business_date) FROM raw_staffing_actual WHERE store_id = ?",
+        (store_id,),
+    ).fetchone()
+    if date_range_row[0] is None:
+        st.info(f"{store_id} 店目前沒有排班原始資料，無法算星期幾眾數。")
+    else:
+        roster_rows = roster_mode_by_weekday(
+            conn, store_id, date_range_row[0], date_range_row[1], saved_config
+        )
+        roster_df = pd.DataFrame(roster_rows)
+        st.dataframe(roster_df, hide_index=True, use_container_width=True)
+        st.caption(
+            f"取樣範圍 {date_range_row[0]} ~ {date_range_row[1]}；「眾數」= 該星期幾在取樣範圍內"
+            "最常出現的（正職人數, 兼職人數）組合，「一致比例」欄位偏低代表那格排法變動較大、"
+            "沒有固定模式。"
+        )
+
+
 def load_cookie_settings() -> dict:
     if not CONFIG_PATH.exists():
         st.error(
@@ -832,6 +974,7 @@ elif auth_status:
         if "admin" in roles:
             pages.append("月盈虧")
         pages.append("排班建議")
+        pages.append("時段人力與杯數")
         choice = st.radio("功能選單", pages)
 
         st.divider()
@@ -848,3 +991,6 @@ elif auth_status:
     elif choice == "排班建議":
         st.title("排班建議")
         render_staffing_page()
+    elif choice == "時段人力與杯數":
+        st.title("時段人力與杯數")
+        render_hourly_pattern_page()

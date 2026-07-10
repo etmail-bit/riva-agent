@@ -115,6 +115,28 @@ CREATE TABLE raw_hourly_pattern_monthly (
     imported_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- 2026-07-10 新增：單一天（非月彙總）的時段占比樣本，目前只有使用者額外提供的
+-- 星期六/日抽樣（data/raw/週末時段占比/），用來反推真實的平日/假日逐時段杯數
+-- （raw_hourly_pattern_monthly 是月彙總、無法區分平日假日）。business_date 是從
+-- 檔名「第N個星期六/日」+ 該月是否為 2026-02 例外，配合當月行事曆算出來的，
+-- 假設檔名的序號是照日期由小到大排的。
+CREATE TABLE raw_hourly_pattern_daily (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    business_date TEXT NOT NULL,    -- 'YYYY-MM-DD'
+    hour_slot TEXT NOT NULL,
+    walkin_count INTEGER,
+    pickup_count INTEGER,
+    delivery_count INTEGER,
+    platform_count INTEGER,
+    sales_amount INTEGER,
+    pct_of_total REAL,
+    cups INTEGER,
+    source_file TEXT NOT NULL,
+    imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, business_date, hour_slot)
+);
+
 -- ============================================================
 -- Layer 2：稽核允收資料 — 跨來源比對過，之後所有分析模組
 -- （月盈虧、排班、熱銷分析）都只查這一層，不直接碰 Layer 1。
@@ -182,6 +204,7 @@ CREATE TABLE monthly_pnl (
     year_month TEXT NOT NULL,
     revenue INTEGER NOT NULL,
     cogs INTEGER NOT NULL,
+    material_waste INTEGER NOT NULL DEFAULT 0,  -- 原物料損耗/報廢，2026-07-10 新增，= cogs × material_waste_pct
     labor_cost INTEGER NOT NULL,
     rent INTEGER NOT NULL,
     utilities INTEGER NOT NULL,

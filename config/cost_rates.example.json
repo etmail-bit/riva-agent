@@ -20,6 +20,9 @@
     "cogs_pct_of_revenue": 0.30,
     "cogs_note": "是否包含包材請自行標註",
 
+    "material_waste_pct": 0.04,
+    "material_waste_note": "原物料損耗/報廢概算率，算法是 cogs × material_waste_pct，是 cogs 之外的獨立成本線",
+
     "labor_insurance_overhead_pct": 0.196,
     "labor_insurance_note": "勞保+健保+勞退雇主負擔概算率，可依當年度費率調整",
 

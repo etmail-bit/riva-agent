@@ -2,6 +2,10 @@
 # 用 ** 遞迴比對，避免以後多一層子資料夾（例如備份檔）就沒被排除到
 # CLAUDE.md 含個人背景/轉職規劃說明，repo 公開後不放上去，只留本機給 AI 助理看
 CLAUDE.md
+# .claude/ 是給 AI 助理看的工具設定/skill，跟 CLAUDE.md 同一個道理不進版控
+# （settings.local.json／scheduled_tasks.lock 目前是靠全域 gitignore 排除，
+# skills/ 子資料夾沒被那條規則涵蓋到，這裡明講一次比較保險，不要只靠全域設定）
+.claude/
 data/raw/
 data/**/*.xlsx
 data/**/*.csv

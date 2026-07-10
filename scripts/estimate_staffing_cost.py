@@ -24,7 +24,8 @@ from pathlib import Path
 
 from scripts.calculate_pnl import get_fixed_cost
 from scripts.calculate_pnl import load_config as load_cost_config
-from scripts.calculate_staffing import get_hourly_data, load_config
+from scripts.calculate_staffing import calculate_delivery_hours, get_hourly_data, load_config
+from scripts.compare_staffing import calculate_actual_hourly_average
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
@@ -56,51 +57,6 @@ def actual_hours_by_employee_day(conn, store_id, year_month):
         (store_id, year_month),
     ).fetchall()
     return {(r["employee_code"], r["business_date"]): r["hrs"] for r in rows}
-
-
-def _time_to_minutes(value):
-    hour, minute = value.split(":")
-    return int(hour) * 60 + int(minute)
-
-
-def actual_hourly_average(conn, store_id, year_month, hour_slots):
-    """逐時段平均實際人力，供 hourly_breakdown() 逐時段列出用。
-
-    2026-07-09 踩雷記錄：一開始直接借用 compare_staffing.py 的
-    calculate_actual_hourly_average()，結果逐時段加總（36.9 小時/天）比
-    actual_cost() 算出來的總排班時數（34.0 小時/天）還高，數字對不起來。
-    原因是那支函式用「班表區間」（start_time～end_time）算，8 小時以上的班
-    通常內含 0.5 小時無薪休息（scheduled_hours 已經扣掉了，區間本身沒扣），
-    照區間算等於把休息時間也算成「有人顧店」。這裡改成用 scheduled_hours
-    校正：每筆班表算出 scale = scheduled_hours ÷ 區間總小時數，每個小時桶只
-    分配「重疊分鐘數 ÷ 60 × scale」，這樣才跟彙整數字的計算基礎一致，逐時段
-    加總才對得起來（不含 09:00 前的煮茶時段除外，見 hourly_breakdown() 的
-    說明）。"""
-    rows = conn.execute(
-        "SELECT business_date, start_time, end_time, scheduled_hours FROM raw_staffing_actual "
-        "WHERE store_id = ? AND substr(business_date, 1, 7) = ? "
-        "AND start_time IS NOT NULL AND end_time IS NOT NULL AND scheduled_hours IS NOT NULL",
-        (store_id, year_month),
-    ).fetchall()
-    days = {r["business_date"] for r in rows}
-    if not days:
-        return {}
-
-    totals = {h: 0.0 for h in hour_slots}
-    for r in rows:
-        start_min, end_min = _time_to_minutes(r["start_time"]), _time_to_minutes(r["end_time"])
-        span_hours = (end_min - start_min) / 60
-        if span_hours <= 0:
-            continue
-        scale = r["scheduled_hours"] / span_hours
-        for hour_slot in hour_slots:
-            hour = int(hour_slot)
-            window_start, window_end = hour * 60, (hour + 1) * 60
-            overlap = min(end_min, window_end) - max(start_min, window_start)
-            if overlap > 0:
-                totals[hour_slot] += (overlap / 60) * scale
-
-    return {h: round(v / len(days), 2) for h, v in totals.items()}
 
 
 def actual_cost(conn, store_id, year_month, config):
@@ -171,7 +127,8 @@ def _required_staff_per_hour(hourly_data: dict, config: dict, scenario: str) -> 
     for hour_slot, data in hourly_data.items():
         floor = peak_floor if (scenario == "conservative" and hour_slot in peak_hours) else base_floor
         cups = data["daily_avg_cups"] or 0
-        demand_driven = math.ceil(cups / capacity) if cups else 0
+        delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
+        demand_driven = math.ceil(cups / capacity + delivery_hours) if (cups or delivery_hours) else 0
         required[hour_slot] = max(floor, demand_driven)
     return required
 
@@ -188,21 +145,68 @@ def justified_hours_per_day(conn, store_id, year_month, config, scenario: str):
     return sum(required.values()) + prep_hours
 
 
+def _time_to_minutes(value):
+    hour, minute = value.split(":")
+    return int(hour) * 60 + int(minute)
+
+
+def actual_hourly_average_by_role(conn, store_id, year_month, hour_slots, config):
+    """逐時段實際人力，拆成正職（店長/店員）跟兼職兩組，讓兩組加總會等於
+    「實際平均人力」那欄——算法要跟 calculate_actual_hourly_average() 完全一樣：
+    只要班表跟這個時段的區間「有重疊」就算滿 1 人，不是按重疊分鐘數算比例
+    （那樣兩者加總會對不起來，第一版就是犯了這個錯）。員工代碼沒在
+    employee_roles 設定角色的，歸類成「未分類」，不會悄悄併進正職或兼職。"""
+    roles = config["employee_roles"]
+    rows = conn.execute(
+        "SELECT business_date, employee_code, start_time, end_time FROM raw_staffing_actual "
+        "WHERE store_id = ? AND substr(business_date, 1, 7) = ? "
+        "AND start_time IS NOT NULL AND end_time IS NOT NULL",
+        (store_id, year_month),
+    ).fetchall()
+    days = {r["business_date"] for r in rows}
+    if not days:
+        return {}
+    n_days = len(days)
+
+    group_names = ("正職", "兼職", "未分類")
+    totals = {h: {g: 0 for g in group_names} for h in hour_slots}
+    for r in rows:
+        role = roles.get(r["employee_code"])
+        group = "正職" if role in ("manager", "staff") else "兼職" if role == "part_time" else "未分類"
+        start_min, end_min = _time_to_minutes(r["start_time"]), _time_to_minutes(r["end_time"])
+        for hour_slot in hour_slots:
+            hour = int(hour_slot)
+            window_start, window_end = hour * 60, (hour + 1) * 60
+            if start_min < window_end and end_min > window_start:
+                totals[hour_slot][group] += 1
+
+    return {
+        h: {g: round(v / n_days, 2) for g, v in groups.items()}
+        for h, groups in totals.items()
+    }
+
+
 def hourly_breakdown(conn, store_id, year_month, config) -> list:
     """逐時段落差明細：杯量、實際平均人力、保守/積極版合理人力與落差——用來驗證彙整
     數字（例如「保守版落差 X 小時/天」）具體是哪幾個時段貢獻的，不用照單全收整合結論。
 
-    這張表的「逐時段加總」不會精確等於上面彙整表的「合理人力(人-小時/天)」，因為
-    合理人力多算了 1 小時固定的煮茶後場人力（tea_brewing.estimated_duration_hours），
-    但逐時段表只涵蓋 raw_hourly_pattern_monthly 有資料的時段（通常從 09:00 開始，
-    煮茶時段落在這之前，沒有對應的時段可以列）；「實際平均人力」也不含 09:00 前
-    煮茶時段的人力。兩邊都少算同一段時間，方向一致，只是煮茶用的是固定假設值、
-    不是逐時段杯量算出來的，所以不會剛好對到小數點。"""
+    「實際平均人力」= 排班表寫的起訖時間直接算（比照 compare_staffing.py 的
+    calculate_actual_hourly_average()，「排班建議」頁用的也是這個），不扣休息時間——
+    2026-07-09 使用者要求：休息時間幾點發生是猜的，不管怎麼猜都不直覺，班表寫幾點
+    到幾點，這裡就顯示幾個人，符合現場實際看到的排班表。
+
+    也因為這樣，這張表的逐時段加總會比彙整表的「落差(小時/天)」略高（多出來的部分
+    大約等於這些班次的休息時數）——這是預期中的差異，不是算錯：彙整的「可省成本」
+    看的是「實際付薪時數」（已扣休息，不然會多算成本），這張表看的是「現場排了幾個
+    人」（不扣休息，回答「這個時段班表上有幾個人」），兩者問的問題不一樣，數字本來
+    就不會完全對齊。"""
     hourly_data = get_hourly_data(conn, store_id, year_month)
     if not hourly_data:
         return []
 
-    actual_avg = actual_hourly_average(conn, store_id, year_month, hourly_data.keys())
+    actual_avg = calculate_actual_hourly_average(conn, store_id, year_month, hourly_data.keys())
+    by_role = actual_hourly_average_by_role(conn, store_id, year_month, hourly_data.keys(), config)
+    has_unclassified = any(by_role.get(h, {}).get("未分類", 0) for h in hourly_data)
     required_by_scenario = {
         scenario: _required_staff_per_hour(hourly_data, config, scenario) for scenario in SCENARIOS
     }
@@ -211,7 +215,16 @@ def hourly_breakdown(conn, store_id, year_month, config) -> list:
     for hour_slot in sorted(hourly_data.keys()):
         cups = hourly_data[hour_slot]["daily_avg_cups"] or 0
         actual = actual_avg.get(hour_slot)
-        row = {"時段": f"{hour_slot}:00", "杯量": cups, "實際平均人力": actual}
+        role_split = by_role.get(hour_slot, {})
+        row = {
+            "時段": f"{hour_slot}:00",
+            "杯量": cups,
+            "實際平均人力": actual,
+            "正職": role_split.get("正職", 0.0),
+            "兼職": role_split.get("兼職", 0.0),
+        }
+        if has_unclassified:
+            row["未分類"] = role_split.get("未分類", 0.0)
         for scenario in SCENARIOS:
             required = required_by_scenario[scenario][hour_slot]
             row[f"{SCENARIO_LABELS[scenario]}合理人力"] = required
@@ -394,27 +407,32 @@ def build_report(conn, config, stats_by_store: dict) -> str:
         lines.append(f"### {store_id} 店逐時段落差明細（驗證用）")
         lines.append("")
         lines.append(
-            "上面「合理人力（人-小時/天）」是把下面這張表每個時段的人力加總，"
-            "逐時段落差就是「保守版落差 X.X 小時/天」的來源——哪個時段落差大，"
-            "哪個時段就是主要貢獻者，不用照單全收整合結論。"
+            "用來看哪個時段落差大、哪個時段是主要貢獻者，不用照單全收上面的整合結論。"
         )
         lines.append(
-            "（這張表逐時段加總不會剛好等於上面的「合理人力（人-小時/天）」，"
-            "差距約 1 小時：上面的合理人力多算了固定 1 小時的煮茶後場人力，"
-            "但煮茶時段在 09:00 之前，沒有對應的逐時段杯量資料可以列進這張表。"
-            "「實際平均人力」欄位已經用真實排班時數扣掉不支薪的休息時間校正過，"
-            "不是單純看班表區間。）"
+            "（「實際平均人力」直接看班表起訖時間，不扣休息時間，符合現場排班表看到的人數。"
+            "也因為這樣，這張表的逐時段加總會比上面「合理人力（人-小時/天）」對應的落差"
+            "略高一些（多出來的部分約等於這些班次的休息時數）——彙整表的「可省成本」"
+            "算的是實際付薪時數（扣過休息，不然會多算成本），這張表算的是「班表上排了"
+            "幾個人」，兩者問的問題不同，數字不會完全對齊，是預期中的差異，不是算錯。）"
         )
         lines.append("")
-        lines.append("  | 時段 | 杯量 | 實際平均人力 | 保守版合理人力 | 保守版落差 | 積極版合理人力 | 積極版落差 |")
-        lines.append("  |---|---|---|---|---|---|---|")
+        has_unclassified = s["hourly"] and "未分類" in s["hourly"][0]
+        extra_col = " 未分類 |" if has_unclassified else ""
+        lines.append(
+            "  | 時段 | 杯量 | 實際平均人力 | 正職 | 兼職 |" + extra_col +
+            " 保守版合理人力 | 保守版落差 | 積極版合理人力 | 積極版落差 |"
+        )
+        lines.append("  |---|---|---|---|---|" + ("---|" if has_unclassified else "") + "---|---|---|---|")
         for row in s["hourly"]:
             actual_disp = "—" if row["實際平均人力"] is None else row["實際平均人力"]
             cons_gap = "—" if row["保守版落差"] is None else row["保守版落差"]
             aggr_gap = "—" if row["積極版落差"] is None else row["積極版落差"]
+            extra_val = f" {row['未分類']} |" if has_unclassified else ""
             lines.append(
-                f"  | {row['時段']} | {row['杯量']} | {actual_disp} | {row['保守版合理人力']} | "
-                f"{cons_gap} | {row['積極版合理人力']} | {aggr_gap} |"
+                f"  | {row['時段']} | {row['杯量']} | {actual_disp} | {row['正職']} | {row['兼職']} |" +
+                extra_val +
+                f" {row['保守版合理人力']} | {cons_gap} | {row['積極版合理人力']} | {aggr_gap} |"
             )
         lines.append("")
 
