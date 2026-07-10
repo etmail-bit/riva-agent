@@ -900,12 +900,17 @@ def render_hourly_pattern_page() -> None:
     else:
         col_wd, col_we = st.columns(2)
         with col_wd:
-            st.caption("平日（反推值，用真實假日樣本 + 真實月彙總代數反推）")
+            st.caption("平日（反推值，見下方說明）")
             st.dataframe(pd.DataFrame(daytype_stats["平日"]), hide_index=True, use_container_width=True)
         with col_we:
             st.caption("假日（真實樣本平均，非估計值）")
             st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
         st.caption(
+            "「假日」欄是直接把使用者額外提供的星期六/日單日時段占比報表拿來平均，是真的量出來的數字。"
+            "「平日」欄目前沒有對應的單日原始報表可以直接量，只能用代數反推：POS 系統本來就有的"
+            "「月彙總」杯數（真實資料，但整月平日+假日混在一起，沒有分開）減掉「假日」欄真實量到的"
+            "杯數，剩下的部分才是平日的杯數——這一步是計算出來的，不是實際量到的，但因為公式兩邊都是"
+            "真實資料，準確度比之前用發票交易筆數比例去猜的估計版本高很多。"
             "「月數」是有真實假日樣本可以反推的月份數，不是所有已匯入月份都會出現在這裡。"
         )
 
@@ -923,9 +928,13 @@ def render_hourly_pattern_page() -> None:
         roster_df = pd.DataFrame(roster_rows)
         st.dataframe(roster_df, hide_index=True, use_container_width=True)
         st.caption(
-            f"取樣範圍 {date_range_row[0]} ~ {date_range_row[1]}；「眾數」= 該星期幾在取樣範圍內"
-            "最常出現的（正職人數, 兼職人數）組合，「一致比例」欄位偏低代表那格排法變動較大、"
-            "沒有固定模式。"
+            f"取樣範圍 {date_range_row[0]} ~ {date_range_row[1]}。"
+            "「眾數」＝這個時段、這個星期幾，在取樣範圍內最常出現的（正職人數, 兼職人數）組合。"
+            "「一致比例」＝這個眾數組合的可信度，例如某格顯示「9/10」，代表取樣範圍內這個時段"
+            "共有 10 個該星期幾可以比對，其中 9 天的班表都排出跟眾數一樣的（正職, 兼職）人數，"
+            "只有 1 天不一樣——比例越接近「分母/分母」（例如 10/10）代表這個時段的排法越固定，"
+            "比例偏低（例如 5/10 或更低）代表這個時段的實際排法變動很大，眾數只是「最常見」的"
+            "配置，不是「幾乎每次都這樣」，看到比例偏低的格子時，這個數字的參考價值要打折扣。"
         )
 
 
