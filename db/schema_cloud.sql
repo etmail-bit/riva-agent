@@ -1,6 +1,14 @@
--- 雲端（Turso）子集 schema：只放月盈虧網頁 (app_pnl.py) 需要讀寫的表格。
--- 這是 schema.sql 的子集，刻意不包含任何 Layer 1 原始報表表格（收銀機/發票/銷售明細等）
--- 跟排班相關表格——這些繼續只存在本機 db/riva_agent.db，不會離開這台電腦。
+-- 雲端（Turso）子集 schema：只放 app_pnl.py（月盈虧＋排班摘要）需要讀寫的表格。
+-- 這是 schema.sql 的子集，刻意不包含 Layer 1 原始報表表格（收銀機/發票/銷售明細等）。
+--
+-- 2026-07-10 排班摘要上雲後的邊界：raw_hourly_pattern_monthly/daily 是月/日彙總資料，
+-- 本來就不含員工代碼或逐員工明細，這兩張可以整表同步。但 raw_staffing_actual（逐日逐
+-- 員工的實際排班原始表）跟 config 的 employee_roles/wages（真實角色對照／薪資）永遠
+-- 不上雲——凡是需要用到這兩者才能算出的結果（實際 vs 建議人力比對、正職/兼職眾數），
+-- 一律在本機算完，只把彙總後的結果（不含 employee_code、不含 business_date）存進
+-- staffing_hourly_comparison／staffing_roster_mode 這兩張雲端專用表，見
+-- scripts/migrate_layer2_to_turso.py 的說明。
+--
 -- 若本機 schema.sql 這幾張表的結構有異動，要記得同步更新這裡（唯一事實來源仍是 schema.sql）。
 
 CREATE TABLE IF NOT EXISTS stores (
@@ -89,4 +97,54 @@ CREATE TABLE IF NOT EXISTS store_staffing_insights (
     store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
     summary_text TEXT NOT NULL,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 月彙總的逐時段杯數/外送單數，跟本機 schema.sql 同名但只取「排班建議公式」用得到的
+-- 欄位（不含 sales_amount/walkin_count 等用不到的欄位，減少曝光面）。本來就不含員工
+-- 資料，可以整表安全同步。表名跟本機同名，讓 scripts/calculate_staffing.py 的
+-- get_hourly_data() 原封不動指到這張表就能在雲端跑，不用另外寫雲端專用版本。
+CREATE TABLE IF NOT EXISTS raw_hourly_pattern_monthly (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    year_month TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    daily_avg_cups INTEGER,
+    delivery_count INTEGER,
+    UNIQUE(store_id, year_month, hour_slot)
+);
+
+-- 單日（非月彙總）的逐時段杯數樣本，同樣跟本機同名、只取用得到的欄位，供
+-- scripts/analyze_staffing_daytype.py 的 cup_stats_by_daytype() 原封不動使用。
+CREATE TABLE IF NOT EXISTS raw_hourly_pattern_daily (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    business_date TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    cups INTEGER,
+    UNIQUE(store_id, business_date, hour_slot)
+);
+
+-- 「實際排班 vs 建議人力」整月彙總結果快照，只在本機用 scripts/compare_staffing.py 的
+-- compare() 算完才同步上來，雲端本身查不到 raw_staffing_actual，不會即時重算。
+CREATE TABLE IF NOT EXISTS staffing_hourly_comparison (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    year_month TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    recommended INTEGER NOT NULL,
+    actual REAL,
+    diff REAL,
+    UNIQUE(store_id, year_month, hour_slot)
+);
+
+-- 「星期幾 x 時段」正職/兼職人數眾數快照，只在本機用
+-- scripts/analyze_staffing_daytype.py 的 roster_mode_by_weekday() 算完才同步上來
+-- （該函式需要 config["employee_roles"] 才能算，這個 config 段落本身不上雲）。
+-- 刻意不含 employee_code、不含 business_date，只有彙總後的人數。
+CREATE TABLE IF NOT EXISTS staffing_roster_mode (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    hour_slot TEXT NOT NULL,
+    weekday TEXT NOT NULL,
+    full_time_count INTEGER,
+    part_time_count INTEGER,
+    consistency_ratio TEXT,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, hour_slot, weekday)
 );

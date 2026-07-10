@@ -1,8 +1,10 @@
-"""Streamlit 網頁入口（雲端部署版）：只有月盈虧功能。
+"""Streamlit 網頁入口（雲端部署版）：月盈虧＋排班摘要（彙總後的安全版）。
 
 跟本機用的 app.py 是分開的獨立入口：
-  - app.py    本機跑，含月盈虧＋排班建議（排班較機密，不上雲）
-  - app_pnl.py 雲端部署用，只 import 月盈虧相關程式，排班程式碼完全沒被引用
+  - app.py    本機跑，含月盈虧＋完整版排班（逐日明細、員工代碼對照，較機密，不上雲）
+  - app_pnl.py 雲端部署用，排班部分只 import／顯示彙總後的安全結果，
+    raw_staffing_actual（逐日逐員工明細）與 config 的 wages／employee_roles
+    永遠不會被這支程式碰到，見 render_staffing_summary_page() 的說明。
 
 資料庫改用 Turso（雲端，透過 scripts/turso_client.py 的 HTTP 翻譯層），
 不是本機的 db/riva_agent.db。
@@ -23,8 +25,11 @@ import yaml
 from dotenv import load_dotenv
 from yaml.loader import SafeLoader
 
+from scripts.analyze_staffing_daytype import HOUR_SLOTS, WEEKDAY_NAMES, cup_stats_by_daytype
 from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
+from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data
+from scripts.calculate_staffing import load_config as load_staffing_config_local
 from scripts.chart_helpers import build_trend_chart
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 from scripts.turso_client import TursoConnection
@@ -32,6 +37,7 @@ from scripts.turso_client import TursoConnection
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "auth_config.yaml"
 COST_CONFIG_PATH = ROOT / "config" / "cost_rates.json"
+STAFFING_CONFIG_PATH = ROOT / "config" / "staffing_rules.json"
 
 load_dotenv(ROOT / ".env")  # 本機測試用；部署到 Streamlit Cloud 後改吃 st.secrets
 
@@ -73,6 +79,19 @@ def load_cost_rates_config() -> dict:
         return json.loads(st.secrets["COST_RATES_JSON"])
     except Exception:
         return load_pnl_config()
+
+
+def load_staffing_rules_config() -> dict:
+    """雲端部署時讀 Secrets 的 STAFFING_RULES_JSON——這把 key 裡只會有
+    scripts/print_safe_staffing_config.py 印出的安全子集（capacity/delivery/
+    tea_brewing/shifts/part_time/scenario），不含 wages／employee_roles，
+    是使用者自己在本機產生、自己貼上雲端後台的，這支程式從頭到尾不會經手
+    真實薪資或員工代碼對照表。本機測試時 fallback 讀本機完整版
+    config/staffing_rules.json 沒關係，因為這個頁面只會用到上面那幾個安全 key。"""
+    try:
+        return json.loads(st.secrets["STAFFING_RULES_JSON"])
+    except Exception:
+        return load_staffing_config_local()
 
 
 @st.cache_resource
@@ -612,6 +631,133 @@ def render_pnl_page() -> None:
         st.dataframe(pd.DataFrame(monthly_table), hide_index=True, use_container_width=True)
 
 
+def render_staffing_summary_page() -> None:
+    """排班摘要（雲端安全版）。2026-07-10 新增，只顯示彙總後的結果：
+
+    - 「逐時段建議人力」「平日/假日杯數配置」：雲端即時運算，用的是
+      raw_hourly_pattern_monthly／raw_hourly_pattern_daily（月/日彙總，本來就
+      不含員工資料）＋ load_staffing_rules_config() 的安全子集設定，公式跟本機
+      app.py 完全共用（scripts/calculate_staffing.py／
+      scripts/analyze_staffing_daytype.py），不是另外寫一份。
+
+    - 「實際 vs 建議人力比對」「正職/兼職眾數」：這兩項需要 raw_staffing_actual
+      （逐日逐員工）才能算，這張表本身不上雲，所以雲端這裡查的是
+      staffing_hourly_comparison／staffing_roster_mode 這兩張快照表——本機執行
+      `python3 -m scripts.migrate_layer2_to_turso` 時才會更新，不是雲端即時重算，
+      頁面上會標示資料同步時間，跟目前即時互動的「建議人力表」不同，第一版先不
+      提供調參數功能（比照月盈虧頁之後再視需要加）。
+    """
+    conn = get_db_connection()
+    working_config = load_staffing_rules_config()
+
+    stores = [r["store_id"] for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    store_id = st.selectbox("店別", stores, format_func=lambda s: f"{s} 店", key="staffing_store")
+
+    periods = [
+        r["year_month"]
+        for r in conn.execute(
+            "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly WHERE store_id = ? ORDER BY 1 DESC",
+            (store_id,),
+        ).fetchall()
+    ]
+    if not periods:
+        st.info(f"{store_id} 店目前雲端還沒有時段占比資料，請先在本機執行同步腳本。")
+        return
+    year_month = st.selectbox("月份", periods, key="staffing_month")
+
+    st.subheader(f"{store_id} 店　{year_month}　逐時段建議人力")
+    hourly_data = get_hourly_data(conn, store_id, year_month)
+    if not hourly_data:
+        st.info("這個月份沒有時段占比資料。")
+    else:
+        staffing = calculate_hourly_staffing(hourly_data, working_config)
+        hourly_rows = [
+            {
+                "時段": f"{hour_slot}:00",
+                "日均杯數": staffing[hour_slot]["cups"],
+                "建議前場人力": staffing[hour_slot]["required_front_staff"],
+                "煮茶": "煮茶 +1" if staffing[hour_slot]["tea_brewing"] else "",
+                "日均外送單": staffing[hour_slot]["delivery_count"],
+                "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
+            }
+            for hour_slot in sorted(staffing.keys())
+        ]
+        st.dataframe(pd.DataFrame(hourly_rows), hide_index=True, use_container_width=True)
+        st.caption(
+            "「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能。"
+            "「建議前場人力」已經把外送耗時併進需求：ceil(杯數/產能 + 外送耗時小時數)"
+        )
+
+    st.subheader(f"{store_id} 店　平日/假日逐時段杯數")
+    all_months = [
+        r["year_month"]
+        for r in conn.execute(
+            "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly WHERE store_id = ? ORDER BY 1",
+            (store_id,),
+        ).fetchall()
+    ]
+    daytype_stats = cup_stats_by_daytype(conn, store_id, all_months)
+    if not daytype_stats["平日"] and not daytype_stats["假日"]:
+        st.info(f"{store_id} 店目前雲端沒有可拆分平日/假日的樣本資料。")
+    else:
+        col_wd, col_we = st.columns(2)
+        with col_wd:
+            st.caption("平日（反推值）")
+            st.dataframe(pd.DataFrame(daytype_stats["平日"]), hide_index=True, use_container_width=True)
+        with col_we:
+            st.caption("假日（真實樣本平均）")
+            st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
+
+    st.subheader(f"{store_id} 店　{year_month}　實際 vs 建議人力比對")
+    comparison_rows = conn.execute(
+        "SELECT hour_slot, recommended, actual, diff FROM staffing_hourly_comparison "
+        "WHERE store_id = ? AND year_month = ? ORDER BY hour_slot",
+        (store_id, year_month),
+    ).fetchall()
+    if not comparison_rows:
+        st.info("這個月份雲端還沒有比對快照，請先在本機執行同步腳本。")
+    else:
+        comparison_df = pd.DataFrame(
+            [
+                {
+                    "時段": f"{r['hour_slot']}:00",
+                    "建議人力": r["recommended"],
+                    "實際平均人力": r["actual"],
+                    "差異": r["diff"],
+                }
+                for r in comparison_rows
+            ]
+        )
+        st.dataframe(comparison_df, hide_index=True, use_container_width=True)
+        st.caption("這是本機同步時算好的快照，不是即時重算——本機排班資料更新後要重新執行同步腳本，這裡才會跟著更新。")
+
+    st.subheader(f"{store_id} 店　星期幾 x 時段實際排班人力（正職/兼職眾數）")
+    roster_rows = conn.execute(
+        "SELECT hour_slot, weekday, full_time_count, part_time_count, consistency_ratio, generated_at "
+        "FROM staffing_roster_mode WHERE store_id = ?",
+        (store_id,),
+    ).fetchall()
+    if not roster_rows:
+        st.info(f"{store_id} 店目前雲端還沒有排班眾數快照，請先在本機執行同步腳本。")
+    else:
+        by_hour = {}
+        generated_at = roster_rows[0]["generated_at"]
+        for r in roster_rows:
+            row = by_hour.setdefault(r["hour_slot"], {"時段": f"{r['hour_slot']}:00"})
+            row[f"星期{r['weekday']}_正職"] = r["full_time_count"]
+            row[f"星期{r['weekday']}_兼職"] = r["part_time_count"]
+            row[f"星期{r['weekday']}_一致比例"] = r["consistency_ratio"]
+        roster_df = pd.DataFrame(
+            [by_hour[h] for h in HOUR_SLOTS if h in by_hour]
+        )
+        st.dataframe(roster_df, hide_index=True, use_container_width=True)
+        st.caption(
+            f"這是本機同步時算好的快照（{generated_at}），不是即時重算。"
+            "「眾數」＝這個時段、這個星期幾，取樣範圍內最常出現的（正職人數, 兼職人數）組合；"
+            "「一致比例」越接近「分母/分母」代表這個時段的排法越固定。"
+        )
+
+
 def _cloud_secrets_available() -> bool:
     """雲端部署（Streamlit Cloud）時，帳號設定存在 Secrets 的 AUTH_CONFIG_YAML 這把 key 底下
     （內容就是整份 auth_config.yaml 的文字）；本機測試時沒有這把 key，fallback 讀本機檔案。"""
@@ -678,8 +824,17 @@ elif auth_status:
                 st.error(str(e))
 
     if "admin" not in roles:
-        st.error("此帳號沒有查看月盈虧的權限，請聯絡管理者。")
+        st.error("此帳號沒有查看這個雲端網站的權限，請聯絡管理者。")
         st.stop()
 
-    st.title("月盈虧")
-    render_pnl_page()
+    with st.sidebar:
+        st.divider()
+        page_choice = st.radio("功能選單", ["月盈虧", "排班摘要"])
+
+    if page_choice == "月盈虧":
+        st.title("月盈虧")
+        render_pnl_page()
+    else:
+        st.title("排班摘要")
+        st.caption("只顯示彙總後的安全版結果，逐日排班明細與員工代碼對照永遠留在本機，不會出現在這裡。")
+        render_staffing_summary_page()

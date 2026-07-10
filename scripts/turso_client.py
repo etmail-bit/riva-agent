@@ -22,7 +22,11 @@ def _to_arg(value):
     if isinstance(value, int):
         return {"type": "integer", "value": str(value)}
     if isinstance(value, float):
-        return {"type": "float", "value": str(value)}
+        # 跟 integer 不同，Turso 的 pipeline API 要求 float 的 value 是原生 JSON 數字，
+        # 不是字串——送字串會直接 400（"invalid type: string ..., expected f64"）。
+        # 這個分支在這次排班比對快照（第一個真的傳非 None 浮點數的欄位）之前從沒被
+        # 實際觸發過，才會一直沒被抓到。
+        return {"type": "float", "value": value}
     return {"type": "text", "value": str(value)}
 
 
