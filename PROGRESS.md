@@ -182,7 +182,7 @@ Layer 3（分析產出）
 - 帳號：Turso（帳號代稱 `jessie`），資料庫名稱 `riva-agent-pnl`（空殼名稱，不含店家資訊）
 - 連線資訊（`TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN`）存在本機 `.env`，已加進 `.env.example` 的空白樣板
 - **重要踩雷記錄**：`libsql` 這個 Python 套件在 Python 3.14 + Intel Mac 上跟 `cryptography` 一樣，沒有現成編譯版本，當場編譯又缺 `cmake`／完整 Rust 工具鏈，嘗試用 pip 裝 `cmake` 套件本身也壞掉。**改用 Turso 的「SQL over HTTP」介面**（純 `requests` 打 `POST https://<db>.turso.io/v2/pipeline`，帶 JSON payload），已驗證建表/寫入/讀取/清除都成功。**之後接手這個功能的人不要再嘗試裝 `libsql`，直接用 HTTP 版本。**
-- 影響：里程碥 2（把 `scripts/calculate_pnl.py` 等程式改成可連 Turso）不是簡單換一行連線字串，而是要寫一個小翻譯層，把現有 `conn.execute(sql, params)` 這種 sqlite3 風格呼叫轉成背後的 HTTP pipeline 請求
+- 影響：里程碑 2（把 `scripts/calculate_pnl.py` 等程式改成可連 Turso）不是簡單換一行連線字串，而是要寫一個小翻譯層，把現有 `conn.execute(sql, params)` 這種 sqlite3 風格呼叫轉成背後的 HTTP pipeline 請求
 
 **里程碑 2（已完成）：翻譯層 + 雲端 schema**
 - 新增 `scripts/turso_client.py`：`TursoConnection` 用純 HTTP（`requests`）模仿 sqlite3 的 `execute().fetchall()/.fetchone()` 介面，`commit()/close()` 只是介面相容用的空函式
@@ -190,12 +190,13 @@ Layer 3（分析產出）
 - 已建到 Turso 上，`stores` 塞了 `A`/`B` 兩個代號
 - **關鍵驗證**：用明顯是假資料的測試月份（`2099-01`），直接把 `TursoConnection` 傳給 `scripts/calculate_pnl.py` 既有的 `calculate_one()`／`save_pnl_result()`，**完全沒改這兩個函式一行程式碼**，跑出來的月盈虧試算結果、寫入 `monthly_pnl` 都正確。測試資料已清除，雲端資料庫目前是乾淨狀態（5 張空表 + stores 兩筆代號）。這證明當初「翻譯層」的設計方向是對的：`calculate_pnl.py` 的商業邏輯本來就只依賴 `conn.execute()` 這個介面，不用因為換資料庫而重寫
 
-**里程碑 3（進行中）：`app_pnl.py` 獨立入口**
+**里程碑 3（已完成）：`app_pnl.py` 獨立入口**
 - 新增 `app_pnl.py`：從 `app.py` 搬出月盈虧相關的部分（`render_pnl_page`／`render_manual_revenue_section`），排班相關程式碼完全沒有 import。資料庫連線改用 `TursoConnection`，優先讀 `st.secrets`（雲端部署後用），本機測試 fallback 讀 `.env`（`_get_secret()` 函式處理這個切換，兩邊共用同一份程式碼不用分岔）
 - **效能優化**：`TursoConnection` 原本每次查詢都重新建立一次 HTTPS 連線，一頁面 9~10 次查詢會很慢；改成用 `requests.Session` 重複使用連線 (keep-alive)
 - **已用 Playwright 實測驗證（本機 port 8502，非正式 demo 帳密，測試後已重設）**：登入 → 選店別 A 店 → 展開「手動輸入月營收」→ 輸入測試月份 `2099-01`／營收 100000 → 儲存 → 直接查 Turso 確認寫入成功 → 月份下拉選單正確出現 `2099-01` → 試算結果正確顯示（營收 100,000、稅後淨利 -353,000，跟本機固定成本設定相符）→ 歷史走勢區塊正常。**測試資料已清除，Turso 恢復乾淨狀態。**
-- **效能結論（已於里程碑 4 驗證，問題已關閉）**：除錯機器測試量到 14 秒，一度懷疑要換 Turso 機房；部署到 Streamlit Cloud 後，使用者實測真實載入時間是 **1.3 秒**。證實當初的猜測是對的——慢的是「除錯機器所在網路 → 美國西岸 Turso」這段路徑本身，不是 Turso 或程式碼的問題，正式路徑（Streamlit Cloud 伺服器 → Turso）速度完全沒問題。**不用換機房，也不用做查詢批次化。**
-**里程碑 3（已完成）：GitHub private repo**
+- **效能結論（已於里程碑 5 驗證，問題已關閉）**：除錯機器測試量到 14 秒，一度懷疑要換 Turso 機房；部署到 Streamlit Cloud 後，使用者實測真實載入時間是 **1.3 秒**。證實當初的猜測是對的——慢的是「除錯機器所在網路 → 美國西岸 Turso」這段路徑本身，不是 Turso 或程式碼的問題，正式路徑（Streamlit Cloud 伺服器 → Turso）速度完全沒問題。**不用換機房，也不用做查詢批次化。**
+
+**里程碑 4（已完成）：GitHub private repo**
 - 安裝 GitHub CLI (`gh`，官方 zip 下載到 `~/.local/gh`，非 Homebrew)，用 `gh auth login --web` 完成裝置授權登入（帳號 `etmail-bit`）
 - 推送前逐一檢查即將進版控的檔案清單（`git add -A -n` 預覽），並全文搜尋真實店名/員工姓名確認沒有漏網
 - **推送前抓到兩個零洩漏疏漏，已修正**：
@@ -216,7 +217,7 @@ Layer 3（分析產出）
 
 現在 repo（`etmail-bit/riva-agent`）是 **PUBLIC**，只有一次乾淨的 commit，已用 GitHub API 直接確認歷史紀錄乾淨。
 
-**里程碑 4（已完成）：Streamlit Community Cloud 部署**
+**里程碑 5（已完成）：Streamlit Community Cloud 部署**
 
 第一次部署後立刻噴 `FileNotFoundError`：`scripts/calculate_pnl.py` 的 `load_config()` 直接讀本機 `config/cost_rates.json`（真實成本數字，被 `.gitignore` 排除），雲端主機讀不到。這是跟帳號設定檔（`AUTH_CONFIG_YAML`）同一種模式的坑，之前只顧著修帳密那個，漏了這個。
 
@@ -226,11 +227,11 @@ Layer 3（分析產出）
 
 2026-07-09 部署成功，使用者已在自己的終端機重設 `demo_admin` 為正式密碼（全程沒有經過我，密碼只有使用者知道），並把 `AUTH_CONFIG_YAML`／`COST_RATES_JSON`／`TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN` 更新進 Streamlit Cloud 的 Secrets。實際登入畫面確認：登入成功、雲端模式提示正確顯示、「A 店目前沒有已驗證的營收資料」警告正確（Turso 上還是空的，符合預期）、沒有任何錯誤訊息。
 
-**里程碑 5（已完成，2026-07-09）：真實資料搬遷上 Turso**
+**里程碑 6（已完成，2026-07-09）：真實資料搬遷上 Turso**
 
 跟使用者確認風險（真實金額透過網路傳到第三方雲端服務）後執行。新增 `scripts/migrate_layer2_to_turso.py`，把本機 `daily_revenue_validated`（602 筆）／`monthly_cost_actuals`（1 筆）／`monthly_pnl`（20 筆，跟使用者另外確認過後追加）用 `INSERT ... ON CONFLICT DO UPDATE` 寫進 Turso（冪等可重跑，本機資料異動後重跑即可同步最新狀態）。刻意不搬 Layer 1 原始報表（收銀機/發票/銷售明細）與排班相關表格，永遠只留在本機。
 
-驗證：三張表筆數與加總金額（`revenue_from_register`／`net_profit`）本機/雲端比對一致；用「本機模擬雲端模式」（見里程碑 4 驗證方式）登入雲端版，A 店 2026-06 試算結果跟本機完全一致、B 店房租正確顯示 override 值、**歷史走勢圖（含兩店合計線）跟彙整建議區塊都正常顯示，數字與本機一致**。
+驗證：三張表筆數與加總金額（`revenue_from_register`／`net_profit`）本機/雲端比對一致；用「本機模擬雲端模式」（見里程碑 5 驗證方式）登入雲端版，A 店 2026-06 試算結果跟本機完全一致、B 店房租正確顯示 override 值、**歷史走勢圖（含兩店合計線）跟彙整建議區塊都正常顯示，數字與本機一致**。
 
 同一次順便完成的網頁優化（使用者於 2026-07-09 提出，已用 Playwright 實測驗證）：
 1. **成本設定支援單店 override**：`config/cost_rates.json` 新增 `fixed_costs_monthly_overrides`（key 是 store_id），`scripts/calculate_pnl.py` 新增 `get_fixed_cost(config, store_id, key)` 統一查詢邏輯，app.py／app_pnl.py 的固定成本輸入框、what-if 試算、「儲存為新的預設值」按鈕都改用這個函式（後者的邏輯是：這個店這個項目已經有 override 就繼續存回 override，否則存回共用預設值）。用來讓 B 店房租跟共用預設值分開調整（真實數字只在 `config/cost_rates.json`，不進版控；過程中有一次輸入金額打錯位數，使用者當場發現並更正，已重算）。
