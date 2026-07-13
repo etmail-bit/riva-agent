@@ -8,6 +8,13 @@ streamlit-authenticator==0.4.2
 openpyxl==3.1.5
 pandas==3.0.3
 
-# Turso 雲端資料庫連線用（月盈虧上雲），純 HTTP 方式，見 scripts/turso_client.py 說明
-requests==2.34.2
+# numpy/pyarrow 原本沒釘版本，2026-07-13 雲端部署時因此抓到剛發布的 pyarrow 25.0.0，
+# 在 Streamlit Cloud 的 Linux + Python 3.14 環境下，圖表資料轉換觸發 C++ 層級
+# segmentation fault（Python 的 try/except 攔不到，整個 process 直接死掉，
+# 畫面顯示「Oh no. Error running app.」）。本機用 24.0.0 測試同一批資料完全正常，
+# 兩邊都有現成的 Linux cp314 預編譯包，故直接釘住這組已驗證過的版本，避免雲端每次
+# 重新部署都可能抓到還沒踩過雷的最新版。
+numpy==2.5.1
+pyarrow==24.0.0
+
 python-dotenv==1.2.2
