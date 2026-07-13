@@ -21,7 +21,7 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 
-from scripts.analyze_operations import channel_mix, hourly_channel_by_weekday, repeat_customer_stats
+from scripts.analyze_operations import channel_mix, hourly_channel_by_weekday, repeat_customer_stats, weekday_daily_summary
 from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, cup_stats_by_daytype, roster_mode_by_weekday
 from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
@@ -996,6 +996,40 @@ def render_hourly_pattern_page() -> None:
                 "「發票張數」是杯量的替代指標（目前沒有逐日、涵蓋一~日七天的真實杯數資料），"
                 "「營業額」是直接量到的真實金額，兩者都是日均值，不是取樣期間的總和。"
             )
+
+    st.subheader("星期幾彙整：每日營業額/發票張數的中位數、最大值、最小值")
+    weekday_summary_rows = weekday_daily_summary(conn, store_id)
+    if not weekday_summary_rows:
+        st.info(f"{store_id} 店目前沒有發票明細資料，無法彙整星期幾統計。")
+    else:
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "星期": f"星期{r['星期']}",
+                        "天數": r["天數"],
+                        "營業額中位數": r["營業額中位數"],
+                        "營業額最小": r["營業額最小"],
+                        "最小發生日": r["營業額最小日期"],
+                        "營業額最大": r["營業額最大"],
+                        "最大發生日": r["營業額最大日期"],
+                        "發票中位數": r["發票中位數"],
+                        "發票最小": r["發票最小"],
+                        "發票最小發生日": r["發票最小日期"],
+                        "發票最大": r["發票最大"],
+                        "發票最大發生日": r["發票最大日期"],
+                    }
+                    for r in weekday_summary_rows
+                ]
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            "先把每天彙總成當天的總營業額/總發票張數，再依星期幾分組取中位數/最大/最小值"
+            "（並附上最大/最小值實際發生的日期，方便回頭查是不是連假、天氣、設備故障等特殊事件）。"
+            "跟上面「星期幾 x 時段」圖表的差別：那張圖是時段層級的日均值，這張表是先看「當天全天」表現。"
+        )
 
 
 def load_cookie_settings() -> dict:

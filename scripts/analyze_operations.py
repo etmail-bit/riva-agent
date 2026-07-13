@@ -10,14 +10,16 @@
 raw_cash_register_daily／raw_hourly_pattern_monthly），這些表格依零洩漏原則
 只存在本機 db/riva_agent.db，這支腳本跟輸出報告都刻意不會被任何雲端功能引用。
 
-輸出：reports/operational_report_<YYYY-MM-DD>.md（reports/ 已加進 .gitignore，
-不進版控——報告內容含真實通路/客單價/營收數字）。
+`build_report()` 回傳報告文字，由 `scripts/generate_full_report.py` 彙整進單一份
+`reports/月度總報告_<日期>.md`（2026-07-13 起不再自己寫出獨立檔案）；`main()` 只在
+CLI 除錯時印到終端機用。
 
 用法：
     source .venv/bin/activate
     python3 -m scripts.analyze_operations
 """
 import sqlite3
+import statistics
 from collections import defaultdict
 from datetime import date
 from pathlib import Path
@@ -26,7 +28,6 @@ from scripts.analyze_staffing_daytype import HOUR_SLOTS, WEEKDAY_NAMES
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
-REPORTS_DIR = ROOT / "reports"
 
 # 通路分類：外送平台會被抽 35% 佣金（見 config/cost_rates.json），
 # 自取/外帶沒有這筆隱形成本，這是通路組合分析的核心切點。
@@ -131,6 +132,56 @@ def hourly_channel_by_weekday(conn, store_id):
     return result
 
 
+def weekday_daily_summary(conn, store_id):
+    """星期幾（一~日）彙整：每日總營業額／總發票張數的中位數、最大值、最小值
+    （2026-07-13 新增，回應使用者「哪個星期幾表現特別好/特別差、異常日是哪天」的問題）。
+    跟 hourly_channel_by_weekday() 不同顆粒度：那支是「星期幾 x 時段」的日均值，
+    這支是先把每天彙總成當天一個總數，再依星期幾分組取統計值，並保留最大/最小值
+    發生的實際日期，方便回頭查當天是否有連假、天氣、設備故障等特殊事件。
+
+    回傳每個星期幾一筆 dict：{星期, 天數, 營業額中位數, 營業額最小, 營業額最小日期,
+    營業額最大, 營業額最大日期, 發票中位數, 發票最小, 發票最小日期, 發票最大, 發票最大日期}。
+    """
+    rows = conn.execute(
+        "SELECT substr(tx_time, 1, 10) AS biz_date, amount "
+        "FROM raw_invoice_transactions WHERE store_id = ? AND tx_status = '正常'",
+        (store_id,),
+    ).fetchall()
+    if not rows:
+        return []
+
+    daily = defaultdict(lambda: [0, 0])  # biz_date -> [revenue, count]
+    for r in rows:
+        cell = daily[r["biz_date"]]
+        cell[0] += r["amount"]
+        cell[1] += 1
+
+    by_weekday = {wd: [] for wd in WEEKDAY_NAMES}
+    for biz_date, (revenue, count) in daily.items():
+        wd_name = WEEKDAY_NAMES[date.fromisoformat(biz_date).weekday()]
+        by_weekday[wd_name].append((biz_date, revenue, count))
+
+    result = []
+    for wd in WEEKDAY_NAMES:
+        items = by_weekday[wd]
+        if not items:
+            continue
+        revs = sorted(items, key=lambda x: x[1])
+        cnts = sorted(items, key=lambda x: x[2])
+        n = len(items)
+        result.append({
+            "星期": wd,
+            "天數": n,
+            "營業額中位數": round(statistics.median(x[1] for x in items)),
+            "營業額最小": revs[0][1], "營業額最小日期": revs[0][0],
+            "營業額最大": revs[-1][1], "營業額最大日期": revs[-1][0],
+            "發票中位數": statistics.median(x[2] for x in items),
+            "發票最小": cnts[0][2], "發票最小日期": cnts[0][0],
+            "發票最大": cnts[-1][2], "發票最大日期": cnts[-1][0],
+        })
+    return result
+
+
 def repeat_customer_stats(conn, store_id):
     """回頭客分析（2026-07-10 新增）。carrier_no（手機載具號碼）視同客戶個資等級的識別碼，
     只在這裡當 GROUP BY 的內部 key 用，從頭到尾不把原始 carrier_no 存進回傳值或報告——
@@ -210,6 +261,7 @@ def _compute_all(conn, store_ids) -> dict:
             "inv": invoice_stats(conn, sid),
             "peaks": peak_hours(conn, sid),
             "repeat": repeat_customer_stats(conn, sid),
+            "weekday_summary": weekday_daily_summary(conn, sid),
         }
         for sid in store_ids
     }
@@ -296,6 +348,20 @@ def build_report(conn, store_ids, per_store: dict | None = None) -> str:
                     if repeat["latest_returning_pct"] is not None else ""
                 )
             )
+        weekday_summary = per_store[sid].get("weekday_summary")
+        if weekday_summary:
+            lines.append(
+                "- **星期幾營業額/發票張數彙整**（每日彙總後依星期幾分組，2026-07-13 新增）："
+            )
+            for row in weekday_summary:
+                lines.append(
+                    f"  - 星期{row['星期']}（{row['天數']} 天）：營業額中位數 {row['營業額中位數']:,} 元"
+                    f"（最低 {row['營業額最小']:,} 元／{row['營業額最小日期']}，"
+                    f"最高 {row['營業額最大']:,} 元／{row['營業額最大日期']}）；"
+                    f"發票中位數 {row['發票中位數']:.0f} 張"
+                    f"（最低 {row['發票最小']} 張／{row['發票最小日期']}，"
+                    f"最高 {row['發票最大']} 張／{row['發票最大日期']}）"
+                )
         lines.append("")
 
     if len(store_ids) > 1:
@@ -362,16 +428,13 @@ def build_report(conn, store_ids, per_store: dict | None = None) -> str:
 
 
 def main():
+    """CLI 除錯用進入點：只印到終端機，不寫檔（2026-07-13 起，標準管線改成
+    `scripts/generate_full_report.py` 統一彙整成單一報告，這支腳本不再自己
+    寫出 `operational_report_<日期>.md`，避免產出使用者不想要的分散檔案）。"""
     conn = _conn()
     store_ids = [r[0] for r in conn.execute("SELECT store_id FROM stores ORDER BY store_id")]
     per_store = _compute_all(conn, store_ids)
     report = build_report(conn, store_ids, per_store)
-
-    REPORTS_DIR.mkdir(exist_ok=True)
-    out_path = REPORTS_DIR / f"operational_report_{date.today().isoformat()}.md"
-    out_path.write_text(report, encoding="utf-8")
-    print(f"營運報告已寫入 {out_path}")
-    print()
     print(report)
 
     persist_operational_insights(conn, per_store)

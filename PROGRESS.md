@@ -390,3 +390,48 @@ Skill 內容涵蓋：完整 Layer 1→2→3 管線執行順序、排班照片謄
 **新增獨立頁面「時段人力與杯數」**（跟「月盈虧」「排班建議」同一層級的網頁選單項目，admin/staff 都看得到）：把原本埋在「排班建議」頁裡的「平日/假日逐時段杯數」跟「星期幾 x 時段實際排班人力（正職/兼職眾數）」兩個區塊搬出來獨立成一頁，讓「排班建議」頁專注在參數調整＋建議人力＋比對，這頁專注在純觀察用的實際資料。
 
 已用 Playwright 實測「彙整」頁三個圖表跟「時段人力與杯數」頁都正確顯示、無錯誤。這次的新增內容也同步補進 `monthly-ops-refresh` skill 的 `SKILL.md`（第 5 步「網頁自動反映」）跟 `references/pipeline_steps.md`（`analyze_operations.py` 函式被 CLI 報告跟網頁圖表共用的說明）。
+
+## 排班比對圖表化＋全年彙總＋星期幾發票張數/營業額（2026-07-13 完成）
+
+延續「測試網頁有無錯誤」的請求，發現雲端 `AUTH_CONFIG_YAML` Secret 有 YAML 縮排錯誤（貼上 Streamlit Cloud 網頁編輯框時被自動縮排功能打亂），改成單行 flow-style YAML（用大括號寫死結構，不依賴縮排）徹底解決，之後每次更新雲端 Secrets 都用 `pbcopy` 直接寫剪貼簿，不要再貼終端機顯示過的文字（終端機視窗換行會被誤複製成真的換行字元，讓長字串斷在不該斷的地方）。
+
+新增三個排班相關圖表功能，本機 `app.py`／雲端 `app_pnl.py` 都有：
+1. **`scripts/chart_helpers.py` 新增 `build_bar_line_combo_chart()`**：長條（左軸）+ 線（右軸，獨立刻度）的組合圖共用函式，取代原本「實際 vs 建議人力比對」的純表格/折線圖，改成建議人力／實際人力並排長條＋日均杯數線疊加同一張圖。
+2. **全年彙總比對**：`scripts/compare_staffing.py` 新增 `compare_aggregate()`，把多個月份的建議人力/實際人力/杯數逐時段取平均（今年、排除 02 月過年、排除還沒過完的當月）。雲端版同步進 Turso 新表 `staffing_hourly_comparison_yearly`（只存彙總後數字），本機頁面有「單月/全年彙總」radio 切換。
+3. **星期幾 x 時段發票張數/營業額**：`scripts/analyze_operations.py` 新增 `hourly_channel_by_weekday()`，用每筆交易的真實日期回推日曆星期幾（一~日），算出逐時段的日均發票張數跟營業額，用發票張數當杯量的替代指標（因為目前系統沒有涵蓋一~日七天的真實杯數資料，只有平日/假日兩組）。雲端同步進 Turso 新表 `staffing_channel_by_weekday`。
+
+三個功能都已用真實資料驗證過，本機跟本機模擬雲端兩條路徑都測試無誤，Turso 也已經同步過一次（`migrate_layer2_to_turso.py` 新增 `migrate_staffing_comparison_yearly()`／`migrate_channel_by_weekday()` 兩個函式）。
+
+**踩雷記錄**：雲端第一次部署新程式碼時噴 `ImportError: cannot import name 'build_bar_line_combo_chart'`——明明 GitHub 上的檔案內容確認是對的，原因是 Streamlit Cloud 對「`git pull` + 重跑腳本」的處理方式，不會強迫已經 import 過的子模組（例如 `scripts/chart_helpers.py`）重新載入，這跟本機開發時「改 `scripts/` 子模組要手動 kill process 重啟」是同一種病根（見上面「重要踩雷記錄」那節），只是雲端沒辦法自己 kill process，要去 Streamlit Cloud 後台的「Manage app」→「Reboot app」手動觸發完整重啟才會生效。
+
+## 排班產能公式修正：25 杯/hr + 煮茶前場貢獻（2026-07-13 完成，Turso 同步待補）
+
+使用者看了雲端排班摘要頁截圖後，指出兩個排班公式的假設過時：
+1. **外場單位產能**：原本 30 杯/人/hr 改成 **25 杯/人/hr**
+2. **煮茶人力模型**：原本假設「煮茶時段該人力完全不算前場產能，另外 +1 人」，使用者釐清**煮茶的人同時還能兼顧前場出杯，貢獻 8 杯/hr 的前場產能**，不是完全脫離前場——煮茶時段的建議人力公式改成 `ceil(max(0, 杯量 - 8) / 產能 + 外送耗時)`，煮茶這個人本身仍然是額外 +1（有人要顧茶湯），只是不是 0 產出。
+
+順便重新確認過外送單的部分（使用者一度以為可能也要改）：**店家自送每單 30 分鐘、平台外送（UberEats/foodpanda）0 分鐘**這兩個假設都沒有變，這次的改動完全沒動到 `calculate_delivery_hours()`。
+
+改動位置：`config/staffing_rules.json`（真實參數，`capacity.cups_per_staff_per_hour: 25`，新增 `tea_brewing.front_capacity_contribution_cups_per_hour: 8`）、`config/staffing_rules.example.json`（範本同步）、`scripts/calculate_staffing.py::calculate_hourly_staffing()`、`scripts/estimate_staffing_cost.py::_required_staff_per_hour()`（兩處各自獨立算「建議人力」的公式都要改，不然會算出不一致的兩套數字）。已用真實資料驗證（例如 A 店 2026-06 10:00 時段因產能下修，建議人力從 1 人變 2 人）。
+
+雲端 Secrets 的 `STAFFING_RULES_JSON` 已同步更新並貼上生效（雲端排班摘要頁的**即時運算**部分已套用新公式）。**但 Turso 上 `staffing_hourly_comparison`／`staffing_hourly_comparison_yearly` 這兩張快照表還是舊公式（30 杯/hr）算出來的舊數字**，因為要重新執行 `migrate_layer2_to_turso.py` 時 Turso 服務端這個資料庫實例本身開始回應 `502 connect to upstream failed`（見下一節），沒能同步成功。
+
+**下次對話接手時**：先確認 Turso 是否恢復（見下一節的排查方式），恢復後執行 `python3 -m scripts.migrate_layer2_to_turso` 補完這兩張快照表的同步，之後雲端「排班摘要」頁的「單月/全年彙總」兩塊數字才會跟即時運算的部分一致。
+
+## Turso 資料庫 502 故障排查記錄（2026-07-13，狀態：等待恢復）
+
+同步快照表時，Turso 資料庫 `riva-agent-pnl`（URL: `riva-agent-pnl-jessie.aws-us-west-2.turso.io`，ID: `019f4071-f501-786a-9aaf-2f6151920680`）開始持續回應 `502 Bad Gateway: connect to upstream failed`，重試多次（間隔數分鐘到 20 分鐘不等）都一樣，雲端網站 `app_pnl.py` 因此也一度整個打不開（`get_db_connection()` 連不上 Turso）。
+
+**排查順序（確認問題在 Turso 那端，不是我們的程式/資料）**：
+1. `status.turso.tech`（Turso 官方平台狀態頁）顯示 all services online——**平台整體正常，但這不代表單一資料庫實例正常**，這個頁面看的是整體基礎設施健康度，不是逐一租戶資料庫的狀態。
+2. 用 `curl -v` 測試發現：DNS 解析、SSL 憑證、連上 Turso 邊緣閘道都正常，但閘道明確回應「連不到 upstream」——問題定位在「閘道→這個資料庫實際節點」這一段，不是網路/憑證/DNS 問題。
+3. 本機已裝 Turso CLI（`~/.turso/turso`，已登入帳號 jessie）：`turso db show riva-agent-pnl` 顯示中繼資料正常（197 kB、未封存、有 primary 節點），但 `turso db shell riva-agent-pnl "SELECT 1;"` 回報一模一樣的 `502: connect to upstream failed`——**連 Turso 官方 CLI 都連不上**，確認問題在 Turso 平台這個資料庫實例本身，不是我們的 HTTP client 實作（`scripts/turso_client.py`）有問題。
+4. CLI 沒有提供「喚醒/重啟資料庫」的指令（`turso db show --help` 查過，沒有對應 flag），我們這端已經沒有更多自助排查手段。
+
+**下次對話接手時的檢查方式**：
+```
+turso db shell riva-agent-pnl "SELECT 1;"
+```
+如果回傳結果而不是 502 錯誤，代表 Turso 已經恢復，可以接著跑 `python3 -m scripts.migrate_layer2_to_turso` 補完上一節提到的快照同步。如果還是 502，考慮透過 Turso 的支援管道（免費方案通常是 Discord/email）回報，附上資料庫 ID `019f4071-f501-786a-9aaf-2f6151920680` 跟錯誤訊息。
+
+**本機網站完全不受此故障影響**（`app.py` 讀本機 SQLite，跟 Turso 無關），這段期間排班/月盈虧功能都可以正常用本機版本。

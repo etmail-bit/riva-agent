@@ -11,7 +11,9 @@
     不會把正職的固定底薪時數也算進「可省」範圍，那筆錢不會因為調班表就消失。
 
 只吃本機 Layer 1 原始排班明細（raw_staffing_actual）／raw_hourly_pattern_monthly，
-輸出含真實金額，寫進 reports/（已被 .gitignore 排除），不進版控、不上雲端。
+含真實金額，只存在本機 db，不上雲端。`build_report()` 回傳報告文字，由
+`scripts/generate_full_report.py` 彙整進單一份 `reports/月度總報告_<日期>.md`
+（2026-07-13 起不再自己寫出獨立檔案）；`main()` 只在 CLI 除錯時印到終端機用。
 
 用法（注意用 -m 模組執行，這支腳本會 import 同目錄下的 calculate_staffing）：
     source .venv/bin/activate
@@ -24,12 +26,11 @@ from pathlib import Path
 
 from scripts.calculate_pnl import get_fixed_cost
 from scripts.calculate_pnl import load_config as load_cost_config
-from scripts.calculate_staffing import calculate_delivery_hours, get_hourly_data, load_config
+from scripts.calculate_staffing import calculate_delivery_hours, get_hourly_data, is_tea_brewing_hour, load_config
 from scripts.compare_staffing import calculate_actual_hourly_average
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
-REPORTS_DIR = ROOT / "reports"
 
 
 def _conn():
@@ -119,6 +120,7 @@ def _required_staff_per_hour(hourly_data: dict, config: dict, scenario: str) -> 
     capacity_cfg = config["capacity"]
     base_floor = capacity_cfg.get("min_floor_staff", 1)
     capacity = capacity_cfg["cups_per_staff_per_hour"]
+    tea_contribution = config["tea_brewing"].get("front_capacity_contribution_cups_per_hour", 0)
     scenario_cfg = config.get("scenario", {})
     peak_hours = set(scenario_cfg.get("peak_hours", []))
     peak_floor = scenario_cfg.get("peak_floor_staff", base_floor)
@@ -127,8 +129,12 @@ def _required_staff_per_hour(hourly_data: dict, config: dict, scenario: str) -> 
     for hour_slot, data in hourly_data.items():
         floor = peak_floor if (scenario == "conservative" and hour_slot in peak_hours) else base_floor
         cups = data["daily_avg_cups"] or 0
+        # 跟 calculate_staffing.calculate_hourly_staffing() 同一套邏輯：煮茶時段的人
+        # 同時兼顧前場，先扣掉他貢獻的杯量，剩下的才是需要另外配人顧的前場需求。
+        is_tea = is_tea_brewing_hour(hour_slot, config)
+        front_cups = max(0, cups - tea_contribution) if is_tea else cups
         delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
-        demand_driven = math.ceil(cups / capacity + delivery_hours) if (cups or delivery_hours) else 0
+        demand_driven = math.ceil(front_cups / capacity + delivery_hours) if (front_cups or delivery_hours) else 0
         required[hour_slot] = max(floor, demand_driven)
     return required
 
@@ -440,6 +446,9 @@ def build_report(conn, config, stats_by_store: dict) -> str:
 
 
 def main():
+    """CLI 除錯用進入點：只印到終端機，不寫檔（2026-07-13 起，標準管線改成
+    `scripts/generate_full_report.py` 統一彙整成單一報告，這支腳本不再自己
+    寫出 `staffing_cost_estimate_<日期>.md`，避免產出使用者不想要的分散檔案）。"""
     config = load_config()
     cost_config = load_cost_config()
     conn = _conn()
@@ -451,12 +460,6 @@ def main():
             stats_by_store[store_id] = s
 
     report = build_report(conn, config, stats_by_store)
-
-    REPORTS_DIR.mkdir(exist_ok=True)
-    out_path = REPORTS_DIR / f"staffing_cost_estimate_{date.today().isoformat()}.md"
-    out_path.write_text(report, encoding="utf-8")
-    print(f"排班人力成本估算已寫入 {out_path}")
-    print()
     print(report)
 
     persist_staffing_insights(conn, stats_by_store)

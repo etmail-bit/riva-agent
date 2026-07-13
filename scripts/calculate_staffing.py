@@ -12,8 +12,11 @@
     raw_hourly_pattern_monthly 的 delivery_count/platform_count 兩欄是「該月累計總數」，
     不是日均值，要除以當月天數才是跟 daily_avg_cups 同一個量級的「日均外送單數」——
     這是之前的既有 bug（這兩欄從來沒被拿來做過容量計算，只當參考欄印出來，所以沒被抓到）。
-    煮茶班時段（預設 07:30 起 1 小時）該人力在後場煮茶，不計入前場產能，
-    另外用「+1 煮茶」標註，煮完後併入前場支援。
+    煮茶班時段（預設 07:30 起 1 小時）該人力雖然在後場煮茶，但同時還能兼顧前場出杯，
+    貢獻 tea_brewing.front_capacity_contribution_cups_per_hour（預設 8）杯/hr 的前場產能
+    （2026-07-13 使用者澄清，取代先前「完全不計入前場產能」的假設）——這段時間的
+    required_front_staff 公式改成 ceil(max(0, 杯量 - 8) / 產能 + 外送耗時)，另外用
+    「+1 煮茶」標註，代表這個人本身仍然是額外配置（有人要顧茶湯），不是 0 產出。
 
 這一版只印報表、不寫進資料庫（排班邏輯還在跟使用者對數字，等校準過一輪再考慮要不要落地成表）。
 不做班次人數自動最佳化，只呈現「每個班次時間窗內、逐小時的人力需求」，怎麼配人由使用者自己判斷。
@@ -99,16 +102,21 @@ def calculate_delivery_hours(daily_avg_delivery_count, config):
 
 def calculate_hourly_staffing(hourly_data, config):
     capacity = config["capacity"]["cups_per_staff_per_hour"]
+    tea_contribution = config["tea_brewing"].get("front_capacity_contribution_cups_per_hour", 0)
     result = {}
     for hour_slot, data in hourly_data.items():
         cups = data["daily_avg_cups"] or 0
+        is_tea = is_tea_brewing_hour(hour_slot, config)
+        # 煮茶的人「同時」還能兼顧前場出杯，貢獻 tea_contribution 杯/hr，不是完全脫離前場
+        # 產能——煮茶時段要先扣掉這部分杯量，剩下的才是需要另外配人顧的前場需求。
+        front_cups = max(0, cups - tea_contribution) if is_tea else cups
         delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
-        required = math.ceil(cups / capacity + delivery_hours) if (cups or delivery_hours) else 0
+        required = math.ceil(front_cups / capacity + delivery_hours) if (front_cups or delivery_hours) else 0
         result[hour_slot] = {
             "cups": cups,
             "delivery_hours": round(delivery_hours, 2),
             "required_front_staff": required,
-            "tea_brewing": is_tea_brewing_hour(hour_slot, config),
+            "tea_brewing": is_tea,
             "delivery_count": round(data["daily_avg_delivery_count"], 2),
         }
     return result
@@ -124,7 +132,7 @@ def print_report(store_id, year_month, staffing, config):
             f"{hour_slot:<6}{s['cups']:>8}{s['required_front_staff']:>12}{tea_flag:>6}"
             f"{s['delivery_count']:>10}{s['delivery_hours']:>12}"
         )
-    print("（「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能）")
+    print("（「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，這個人同時兼顧前場出杯，已折抵進上面的建議前場人力）")
     print("（「建議前場人力」已經把外送耗時併進需求裡：ceil(杯數/產能 + 外送耗時小時數)）")
 
     print(f"\n班別對照（單位產能 {config['capacity']['cups_per_staff_per_hour']} 杯/人/hr）：")
