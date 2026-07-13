@@ -30,7 +30,7 @@ from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data
 from scripts.calculate_staffing import load_config as load_staffing_config_local
-from scripts.chart_helpers import build_trend_chart
+from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 from scripts.turso_client import TursoConnection
 
@@ -708,14 +708,39 @@ def render_staffing_summary_page() -> None:
             st.caption("假日（真實樣本平均）")
             st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
 
-    st.subheader(f"{store_id} 店　{year_month}　實際 vs 建議人力比對")
-    comparison_rows = conn.execute(
-        "SELECT hour_slot, recommended, actual, diff FROM staffing_hourly_comparison "
-        "WHERE store_id = ? AND year_month = ? ORDER BY hour_slot",
-        (store_id, year_month),
-    ).fetchall()
+    st.subheader(f"{store_id} 店　實際 vs 建議人力比對")
+    compare_mode = st.radio("比對範圍", ["單月", "全年彙總（排除2月）"], horizontal=True, key="staffing_compare_mode")
+
+    months_note = ""
+    if compare_mode == "單月":
+        comparison_rows = conn.execute(
+            "SELECT hour_slot, recommended, actual, diff FROM staffing_hourly_comparison "
+            "WHERE store_id = ? AND year_month = ? ORDER BY hour_slot",
+            (store_id, year_month),
+        ).fetchall()
+        cups_lookup = {h: staffing[h]["cups"] for h in staffing} if hourly_data else {}
+        empty_message = "這個月份雲端還沒有比對快照，請先在本機執行同步腳本。"
+    else:
+        year_row = conn.execute(
+            "SELECT MAX(year) AS year FROM staffing_hourly_comparison_yearly WHERE store_id = ?", (store_id,)
+        ).fetchone()
+        year = year_row["year"] if year_row else None
+        if year:
+            comparison_rows = conn.execute(
+                "SELECT hour_slot, recommended, actual, diff, cups, months_included "
+                "FROM staffing_hourly_comparison_yearly WHERE store_id = ? AND year = ? ORDER BY hour_slot",
+                (store_id, year),
+            ).fetchall()
+            cups_lookup = {r["hour_slot"]: r["cups"] for r in comparison_rows}
+            if comparison_rows:
+                months_note = f"（納入月份：{comparison_rows[0]['months_included']}）"
+        else:
+            comparison_rows = []
+            cups_lookup = {}
+        empty_message = "雲端還沒有全年彙總快照，請先在本機執行同步腳本。"
+
     if not comparison_rows:
-        st.info("這個月份雲端還沒有比對快照，請先在本機執行同步腳本。")
+        st.info(empty_message)
     else:
         comparison_df = pd.DataFrame(
             [
@@ -729,7 +754,31 @@ def render_staffing_summary_page() -> None:
             ]
         )
         st.dataframe(comparison_df, hide_index=True, use_container_width=True)
-        st.caption("這是本機同步時算好的快照，不是即時重算——本機排班資料更新後要重新執行同步腳本，這裡才會跟著更新。")
+        st.caption(f"這是本機同步時算好的快照，不是即時重算——本機排班資料更新後要重新執行同步腳本，這裡才會跟著更新。{months_note}")
+
+        chart_rows = [r for r in comparison_rows if r["actual"] is not None]
+        if chart_rows:
+            bar_df = pd.DataFrame(
+                [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in chart_rows]
+                + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in chart_rows]
+            )
+            line_df = pd.DataFrame(
+                [
+                    {"時段": r["hour_slot"], "日均杯數": cups_lookup[r["hour_slot"]]}
+                    for r in chart_rows
+                    if r["hour_slot"] in cups_lookup
+                ]
+            )
+            compare_chart = build_bar_line_combo_chart(
+                bar_df, "時段", "人力", "人力（人）",
+                line_df, "日均杯數", "日均杯數（杯）",
+                bar_category_field="類別",
+                bar_domain=["建議人力", "實際平均人力"],
+                bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(compare_chart, use_container_width=True)
+            st.caption("橘線是該時段日均杯數（右軸）")
 
     st.subheader(f"{store_id} 店　星期幾 x 時段實際排班人力（正職/兼職眾數）")
     roster_rows = conn.execute(
@@ -756,6 +805,35 @@ def render_staffing_summary_page() -> None:
             "「眾數」＝這個時段、這個星期幾，取樣範圍內最常出現的（正職人數, 兼職人數）組合；"
             "「一致比例」越接近「分母/分母」代表這個時段的排法越固定。"
         )
+
+    st.subheader(f"{store_id} 店　星期幾 x 時段：發票張數與營業額")
+    weekday_rows = conn.execute(
+        "SELECT weekday, hour_slot, invoice_count, revenue, sample_days FROM staffing_channel_by_weekday "
+        "WHERE store_id = ?",
+        (store_id,),
+    ).fetchall()
+    if not weekday_rows:
+        st.info(f"{store_id} 店目前雲端還沒有星期幾發票張數/營業額快照，請先在本機執行同步腳本。")
+    else:
+        weekday_choice = st.selectbox("星期幾", WEEKDAY_NAMES, format_func=lambda w: f"星期{w}", key="cloud_channel_weekday")
+        selected_rows = [r for r in weekday_rows if r["weekday"] == weekday_choice]
+        if not selected_rows:
+            st.info(f"{store_id} 店星期{weekday_choice}目前沒有足夠樣本。")
+        else:
+            bar_df = pd.DataFrame([{"時段": r["hour_slot"], "發票張數": r["invoice_count"]} for r in selected_rows])
+            line_df = pd.DataFrame([{"時段": r["hour_slot"], "營業額": r["revenue"]} for r in selected_rows])
+            sample_days = max((r["sample_days"] or 0) for r in selected_rows)
+            channel_chart = build_bar_line_combo_chart(
+                bar_df, "時段", "發票張數", "發票張數（張）",
+                line_df, "營業額", "營業額（元）",
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(channel_chart, use_container_width=True)
+            st.caption(
+                f"用每筆交易的真實日期回推星期{weekday_choice}（取樣約 {sample_days} 個星期{weekday_choice}），"
+                "「發票張數」是杯量的替代指標（目前沒有逐日、涵蓋一~日七天的真實杯數資料），"
+                "「營業額」是直接量到的真實金額，兩者都是日均值。這是本機同步時算好的快照，不是即時重算。"
+            )
 
 
 def _cloud_secrets_available() -> bool:

@@ -16,6 +16,7 @@ calculate_staffing.calculate_hourly_staffing() 算出的建議人力做逐時段
 """
 import sqlite3
 from pathlib import Path
+from statistics import mean
 
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data
 from scripts.calculate_staffing import load_config as load_staffing_config
@@ -83,6 +84,50 @@ def compare(conn, config, store_id, year_month):
                 "recommended": recommended,
                 "actual": actual,
                 "diff": diff,
+            }
+        )
+    return rows
+
+
+def compare_aggregate(conn, config, store_id, year_months):
+    """跨月彙總版：把多個月份的建議人力、實際人力、日均杯數，逐時段各自取平均。
+
+    刻意「每個月先分別算出當月的建議人力／實際人力，再對這些月份結果取平均」，
+    不是「先把多個月的原始杯數加總再算一次建議人力」——因為建議人力本身是無條件
+    進位算出來的整數，這樣做比較貼近『每個月本來就是分別排班、月月都各自做過一次
+    決策』的實況，而不是把整年當成一個模糊的大平均月份。
+
+    year_months 由呼叫端決定要包含哪些月份（例如排除還沒過完的當月、排除農曆年節
+    的 2 月），這支函式本身不做任何篩選。
+    """
+    hour_slot_data = {}
+    for year_month in year_months:
+        hourly_data = get_hourly_data(conn, store_id, year_month)
+        staffing = calculate_hourly_staffing(hourly_data, config)
+        actual_avg = calculate_actual_hourly_average(conn, store_id, year_month, staffing.keys())
+        for hour_slot, info in staffing.items():
+            slot = hour_slot_data.setdefault(hour_slot, {"recommended": [], "actual": [], "cups": []})
+            slot["recommended"].append(info["required_front_staff"])
+            slot["cups"].append(info["cups"])
+            if hour_slot in actual_avg:
+                slot["actual"].append(actual_avg[hour_slot])
+
+    rows = []
+    for hour_slot in sorted(hour_slot_data.keys()):
+        d = hour_slot_data[hour_slot]
+        recommended = round(mean(d["recommended"]), 2) if d["recommended"] else None
+        actual = round(mean(d["actual"]), 2) if d["actual"] else None
+        cups = round(mean(d["cups"]), 1) if d["cups"] else None
+        diff = None if actual is None or recommended is None else round(actual - recommended, 2)
+        rows.append(
+            {
+                "hour_slot": hour_slot,
+                "recommended": recommended,
+                "actual": actual,
+                "diff": diff,
+                "cups": cups,
+                "months_with_actual": len(d["actual"]),
+                "months_total": len(d["recommended"]),
             }
         )
     return rows

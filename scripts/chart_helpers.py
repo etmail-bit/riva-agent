@@ -22,6 +22,56 @@ _LABEL_DY_OFFSETS = [-12, 14, 30, 46]
 MONTH_STEP_PX = 70
 
 
+def build_bar_line_combo_chart(
+    bar_df,
+    x_field,
+    bar_y_field,
+    bar_y_title,
+    line_df,
+    line_y_field,
+    line_y_title,
+    x_title="時段",
+    bar_category_field=None,
+    bar_domain=None,
+    bar_range=None,
+    line_color="#d97706",
+    height=300,
+):
+    """長條（左軸）+ 線（右軸，獨立刻度）的組合圖，用於「兩種不同單位的指標要在同一張圖
+    比較」的場景（例如人力〈人〉vs 杯數〈杯〉，或發票張數〈張〉vs 營業額〈元〉）。
+
+    bar_df／line_df 是兩份獨立的長格式資料，都需要 x_field 這欄。bar_category_field
+    有給值時（例如「類別」欄存「建議人力」/「實際人力」），長條會依類別並排分組並上色
+    （bar_domain/bar_range 要對齊）；不給則畫單一顏色的長條（例如只有一種指標）。"""
+    x_enc = alt.X(f"{x_field}:N", title=x_title)
+    bar_encode = {
+        "x": x_enc,
+        "y": alt.Y(f"{bar_y_field}:Q", title=bar_y_title),
+        "tooltip": [x_field, bar_y_field] + ([bar_category_field] if bar_category_field else []),
+    }
+    if bar_category_field:
+        bar_encode["xOffset"] = f"{bar_category_field}:N"
+        bar_encode["color"] = alt.Color(
+            f"{bar_category_field}:N",
+            scale=alt.Scale(domain=bar_domain, range=bar_range),
+            legend=alt.Legend(title=None),
+        )
+    bar = alt.Chart(bar_df).mark_bar().encode(**bar_encode)
+
+    line = (
+        alt.Chart(line_df)
+        .mark_line(point=True, strokeWidth=2, color=line_color)
+        .encode(
+            x=x_enc,
+            y=alt.Y(f"{line_y_field}:Q", title=line_y_title, axis=alt.Axis(titleColor=line_color)),
+            tooltip=[x_field, line_y_field],
+        )
+    )
+    # resolve_scale(y="independent")：長條跟線各自算自己的 y 軸範圍（人力用 0~10，
+    # 杯數可能是 0~100），共用同一個 y 軸的話其中一個會被壓到看不出高低差異。
+    return alt.layer(bar, line).resolve_scale(y="independent").properties(height=height)
+
+
 def build_trend_chart(chart_df, domain, color_range, height=300, y_field="金額", y_title="金額（TWD）", value_format=","):
     """chart_df 欄位需為 year_month／項目／<y_field>（預設「金額」，可傳其他欄位名稱
     給非金額的走勢圖用，例如百分比指標）。domain/color_range 是圖例類別跟顏色，順序

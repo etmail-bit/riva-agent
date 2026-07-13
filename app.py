@@ -11,6 +11,7 @@ import copy
 import json
 import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import altair as alt
@@ -20,14 +21,15 @@ import streamlit_authenticator as stauth
 import yaml
 from yaml.loader import SafeLoader
 
-from scripts.analyze_operations import channel_mix, repeat_customer_stats
-from scripts.analyze_staffing_daytype import cup_stats_by_daytype, roster_mode_by_weekday
+from scripts.analyze_operations import channel_mix, hourly_channel_by_weekday, repeat_customer_stats
+from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, cup_stats_by_daytype, roster_mode_by_weekday
 from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data, is_shift_active
 from scripts.calculate_staffing import load_config as load_staffing_config
-from scripts.chart_helpers import build_trend_chart
+from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
+from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
@@ -811,12 +813,35 @@ def render_staffing_page() -> None:
     st.caption(f"兼職班長度參考：{part_time_min}~{part_time_max} 小時")
 
     st.subheader("實際排班 vs 建議人力比對")
-    comparison_rows = compare_actual_vs_recommended(conn, working_config, store_id, year_month)
+    compare_mode = st.radio("比對範圍", ["單月", "全年彙總（排除2月）"], horizontal=True, key="compare_mode")
+
+    if compare_mode == "單月":
+        comparison_rows = compare_actual_vs_recommended(conn, working_config, store_id, year_month)
+        for row in comparison_rows:
+            row["cups"] = staffing.get(row["hour_slot"], {}).get("cups")
+        scope_caption = f"{store_id} 店 {year_month}"
+        months_note = ""
+    else:
+        today_str = date.today().isoformat()
+        current_year, current_year_month = today_str[:4], today_str[:7]
+        agg_months = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly "
+                "WHERE store_id = ? AND year_month LIKE ? AND year_month != ? AND year_month < ? "
+                "ORDER BY 1",
+                (store_id, f"{current_year}-%", f"{current_year}-02", current_year_month),
+            ).fetchall()
+        ]
+        if not agg_months:
+            st.info(f"{store_id} 店 {current_year} 年目前沒有可彙總的完整月份資料。")
+            return
+        comparison_rows = compare_staffing_aggregate(conn, working_config, store_id, agg_months)
+        scope_caption = f"{store_id} 店 {current_year} 年彙總"
+        months_note = f"（納入月份：{'、'.join(agg_months)}，已排除 {current_year}-02 過年月份與未過完的當月）"
+
     if all(row["actual"] is None for row in comparison_rows):
-        st.info(
-            f"{store_id} 店 {year_month} 還沒有實際排班資料，"
-            "請先用 scripts/import_staffing_actual.py 匯入才會顯示比對。"
-        )
+        st.info(f"{scope_caption} 還沒有實際排班資料可比對，請先用 scripts/import_staffing_actual.py 匯入。")
         return
 
     def status_label(diff):
@@ -844,32 +869,26 @@ def render_staffing_page() -> None:
 
     understaffed = sum(1 for r in comparison_rows if r["diff"] is not None and r["diff"] < 0)
     overstaffed = sum(1 for r in comparison_rows if r["diff"] is not None and r["diff"] > 0)
-    st.caption(f"有實際資料的時段中：{understaffed} 個時段人力不足、{overstaffed} 個時段超編")
+    st.caption(f"有實際資料的時段中：{understaffed} 個時段人力不足、{overstaffed} 個時段超編{months_note}")
 
     chart_rows = [r for r in comparison_rows if r["actual"] is not None]
-    chart_df = pd.DataFrame(
-        [{"時段": r["hour_slot"], "建議人力": r["recommended"], "實際平均人力": r["actual"]} for r in chart_rows]
-    ).melt("時段", var_name="項目", value_name="人力")
-    compare_chart = (
-        alt.Chart(chart_df)
-        .mark_line(point=True, strokeWidth=2)
-        .encode(
-            x=alt.X("時段:N", title="時段"),
-            y=alt.Y("人力:Q", title="人力（人）"),
-            color=alt.Color(
-                "項目:N",
-                scale=alt.Scale(
-                    domain=["建議人力", "實際平均人力"],
-                    range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
-                ),
-                legend=alt.Legend(title=None),
-            ),
-            tooltip=["時段", "項目", "人力"],
-        )
-        .properties(height=300)
+    bar_df = pd.DataFrame(
+        [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in chart_rows]
+        + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in chart_rows]
+    )
+    line_df = pd.DataFrame(
+        [{"時段": r["hour_slot"], "日均杯數": r["cups"]} for r in chart_rows]
+    )
+    compare_chart = build_bar_line_combo_chart(
+        bar_df, "時段", "人力", "人力（人）",
+        line_df, "日均杯數", "日均杯數（杯）",
+        bar_category_field="類別",
+        bar_domain=["建議人力", "實際平均人力"],
+        bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+        line_color=CHART_COLOR_COMBINED_NET_PROFIT,
     )
     st.altair_chart(compare_chart, use_container_width=True)
-    st.caption("「實際平均人力」的分母只算「已經有謄打排班資料的天數」，資料補齊前不代表整月狀況")
+    st.caption("「實際平均人力」的分母只算「已經有謄打排班資料的天數」，資料補齊前不代表整月狀況；橘線是該時段日均杯數（右軸）")
 
 
 def render_hourly_pattern_page() -> None:
@@ -936,6 +955,47 @@ def render_hourly_pattern_page() -> None:
             "比例偏低（例如 5/10 或更低）代表這個時段的實際排法變動很大，眾數只是「最常見」的"
             "配置，不是「幾乎每次都這樣」，看到比例偏低的格子時，這個數字的參考價值要打折扣。"
         )
+
+    st.subheader("星期幾 x 時段：發票張數與營業額")
+    weekday_rows = hourly_channel_by_weekday(conn, store_id)
+    if not weekday_rows:
+        st.info(f"{store_id} 店目前沒有發票明細資料，無法拆分星期幾。")
+    else:
+        weekday_choice = st.selectbox("星期幾", WEEKDAY_NAMES, format_func=lambda w: f"星期{w}", key="channel_weekday")
+        bar_df = pd.DataFrame(
+            [
+                {"時段": r["時段"], "發票張數": r[f"星期{weekday_choice}_發票張數"]}
+                for r in weekday_rows
+                if r[f"星期{weekday_choice}_發票張數"] is not None
+            ]
+        )
+        line_df = pd.DataFrame(
+            [
+                {"時段": r["時段"], "營業額": r[f"星期{weekday_choice}_營業額"]}
+                for r in weekday_rows
+                if r[f"星期{weekday_choice}_營業額"] is not None
+            ]
+        )
+        if bar_df.empty:
+            st.info(f"{store_id} 店星期{weekday_choice}目前沒有足夠樣本。")
+        else:
+            # 用「樣本天數最多的時段」當代表值，不是隨便抓第一個有資料的時段——冷門時段
+            # （例如剛開店的 07/08 點）常常整天掛零單，樣本天數會比尖峰時段少很多，
+            # 拿冷門時段的天數當「取樣約 N 天」的說明文字會嚴重低估實際取樣範圍。
+            sample_days = max(
+                (r[f"星期{weekday_choice}_樣本天數"] for r in weekday_rows), default=0
+            )
+            channel_chart = build_bar_line_combo_chart(
+                bar_df, "時段", "發票張數", "發票張數（張）",
+                line_df, "營業額", "營業額（元）",
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(channel_chart, use_container_width=True)
+            st.caption(
+                f"用每筆交易的真實日期回推星期{weekday_choice}（取樣約 {sample_days} 個星期{weekday_choice}），"
+                "「發票張數」是杯量的替代指標（目前沒有逐日、涵蓋一~日七天的真實杯數資料），"
+                "「營業額」是直接量到的真實金額，兩者都是日均值，不是取樣期間的總和。"
+            )
 
 
 def load_cookie_settings() -> dict:

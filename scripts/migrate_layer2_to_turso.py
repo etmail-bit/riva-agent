@@ -34,13 +34,16 @@ migrate_roster_mode()。
     python3 -m scripts.migrate_layer2_to_turso
 """
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, roster_mode_by_weekday
 from scripts.calculate_staffing import load_config as load_staffing_config
+from scripts.analyze_operations import hourly_channel_by_weekday
 from scripts.compare_staffing import compare as compare_staffing
+from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
 from scripts.turso_client import TursoConnection
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -261,6 +264,84 @@ def migrate_staffing_comparison(local, cloud, staffing_config):
     return n
 
 
+def migrate_staffing_comparison_yearly(local, cloud, staffing_config):
+    """跟 migrate_staffing_comparison() 同一個零洩漏設計：本機把 compare_staffing.py 的
+    compare_aggregate() 算完，只把彙總後的逐時段結果（不含任何一天/一位員工的明細）
+    同步上雲。月份範圍跟 app.py 的「全年彙總」選項用同一套規則：當年、排除 02 月
+    （農曆年節），排除還沒過完的當月。"""
+    today_str = date.today().isoformat()
+    current_year, current_year_month = today_str[:4], today_str[:7]
+
+    store_ids = [r["store_id"] for r in local.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    n = 0
+    for store_id in store_ids:
+        agg_months = [
+            r[0]
+            for r in local.execute(
+                "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly "
+                "WHERE store_id = ? AND year_month LIKE ? AND year_month != ? AND year_month < ? "
+                "ORDER BY 1",
+                (store_id, f"{current_year}-%", f"{current_year}-02", current_year_month),
+            ).fetchall()
+        ]
+        if not agg_months:
+            continue
+        rows = compare_staffing_aggregate(local, staffing_config, store_id, agg_months)
+        months_included = ",".join(agg_months)
+        for row in rows:
+            if row["actual"] is None:
+                continue
+            cloud.execute(
+                """
+                INSERT INTO staffing_hourly_comparison_yearly
+                    (store_id, year, hour_slot, recommended, actual, diff, cups, months_included)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(store_id, year, hour_slot) DO UPDATE SET
+                    recommended = excluded.recommended,
+                    actual = excluded.actual,
+                    diff = excluded.diff,
+                    cups = excluded.cups,
+                    months_included = excluded.months_included,
+                    generated_at = datetime('now')
+                """,
+                (store_id, current_year, row["hour_slot"], row["recommended"], row["actual"], row["diff"], row["cups"], months_included),
+            )
+            n += 1
+    return n
+
+
+def migrate_channel_by_weekday(local, cloud):
+    """跟 migrate_roster_mode() 同一套零洩漏設計：本機把
+    analyze_operations.hourly_channel_by_weekday() 算完（來源是 raw_invoice_transactions
+    逐筆交易明細），只把彙總後的「星期幾 x 時段」日均發票張數/營業額同步上雲，
+    不含 carrier_no、不含單筆金額、不含 business_date。"""
+    store_ids = [r["store_id"] for r in local.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    n = 0
+    for store_id in store_ids:
+        rows = hourly_channel_by_weekday(local, store_id)
+        for row in rows:
+            hour_slot = row["時段"]
+            for wd in WEEKDAY_NAMES:
+                invoice_count = row.get(f"星期{wd}_發票張數")
+                if invoice_count is None:
+                    continue
+                cloud.execute(
+                    """
+                    INSERT INTO staffing_channel_by_weekday
+                        (store_id, weekday, hour_slot, invoice_count, revenue, sample_days)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(store_id, weekday, hour_slot) DO UPDATE SET
+                        invoice_count = excluded.invoice_count,
+                        revenue = excluded.revenue,
+                        sample_days = excluded.sample_days,
+                        generated_at = datetime('now')
+                    """,
+                    (store_id, wd, hour_slot, invoice_count, row.get(f"星期{wd}_營業額"), row.get(f"星期{wd}_樣本天數")),
+                )
+                n += 1
+    return n
+
+
 def migrate_roster_mode(local, cloud, staffing_config):
     """對每個店，在本機把 analyze_staffing_daytype.roster_mode_by_weekday() 跑完
     （這一步需要 config["employee_roles"]，全程只在本機記憶體處理），只把彙總後、
@@ -320,6 +401,10 @@ def main():
     print(f"staffing_hourly_comparison（彙總快照）: {n7} 筆已同步到 Turso")
     n8 = migrate_roster_mode(local, cloud, staffing_config)
     print(f"staffing_roster_mode（彙總快照）: {n8} 筆已同步到 Turso")
+    n9 = migrate_staffing_comparison_yearly(local, cloud, staffing_config)
+    print(f"staffing_hourly_comparison_yearly（全年彙總快照）: {n9} 筆已同步到 Turso")
+    n10 = migrate_channel_by_weekday(local, cloud)
+    print(f"staffing_channel_by_weekday（星期幾發票張數/營業額快照）: {n10} 筆已同步到 Turso")
 
 
 if __name__ == "__main__":

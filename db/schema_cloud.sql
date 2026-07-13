@@ -134,6 +134,38 @@ CREATE TABLE IF NOT EXISTS staffing_hourly_comparison (
     UNIQUE(store_id, year_month, hour_slot)
 );
 
+-- 「實際排班 vs 建議人力」跨月彙總（同一年、排除農曆年節月份、排除未過完的當月）快照，
+-- 只在本機用 scripts/compare_staffing.py 的 compare_aggregate() 算完才同步上來。
+-- year 是這批彙總涵蓋的年份（例如 "2026"），months_included 記錄實際納入哪些月份
+-- （逗號分隔字串，例如 "2026-01,2026-03,2026-04"），方便網頁顯示納入範圍。
+CREATE TABLE IF NOT EXISTS staffing_hourly_comparison_yearly (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    year TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    recommended REAL,
+    actual REAL,
+    diff REAL,
+    cups REAL,
+    months_included TEXT,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, year, hour_slot)
+);
+
+-- 「星期幾 x 時段」發票張數/營業額快照，只在本機用
+-- scripts/analyze_operations.py 的 hourly_channel_by_weekday() 算完才同步上來。
+-- 來源是 raw_invoice_transactions（逐筆交易明細），但這裡只存彙總後的日均值，
+-- 不含 carrier_no、不含單筆交易金額、不含 business_date，符合零洩漏原則。
+CREATE TABLE IF NOT EXISTS staffing_channel_by_weekday (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    weekday TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    invoice_count REAL,
+    revenue REAL,
+    sample_days INTEGER,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, weekday, hour_slot)
+);
+
 -- 「星期幾 x 時段」正職/兼職人數眾數快照，只在本機用
 -- scripts/analyze_staffing_daytype.py 的 roster_mode_by_weekday() 算完才同步上來
 -- （該函式需要 config["employee_roles"] 才能算，這個 config 段落本身不上雲）。
