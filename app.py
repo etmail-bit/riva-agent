@@ -793,6 +793,15 @@ def render_staffing_page() -> None:
         "「建議前場人力」已經把外送耗時併進需求：ceil(杯數/產能 + 外送耗時小時數)"
     )
 
+    hourly_df = pd.DataFrame(hourly_rows)
+    staffing_chart = build_bar_line_combo_chart(
+        hourly_df, "時段", "日均杯數", "日均杯數（杯）",
+        hourly_df, "建議前場人力", "建議前場人力（人）",
+        line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+    )
+    st.altair_chart(staffing_chart, use_container_width=True)
+    st.caption("長條（左軸）＝日均杯數，橘線（右軸）＝建議前場人力，兩者刻度各自獨立，方便看杯量跟人力需求的曲線是否同步升降。")
+
     st.subheader("班別彙總")
     summary_rows = []
     for shift in working_config["shifts"]:

@@ -310,7 +310,7 @@ def build_staffing_summary(s: dict) -> str:
 def build_public_staffing_summary(s: dict) -> str:
     """2026-07-09 使用者確認的公開範圍：只放「預估可節省金額」跟「省下的人力時數」，
     不含真實人事成本／固定薪資／實際排班時數這些底片數字。這個版本（不是
-    build_staffing_summary() 那個完整版）才是 migrate_layer2_to_turso.py 會同步
+    build_staffing_summary() 那個完整版）才是 build_cloud_snapshot.py 會同步
     上雲端的內容。"""
     cons, aggr = s["scenarios"]["conservative"], s["scenarios"]["aggressive"]
     return (
@@ -326,7 +326,7 @@ def persist_staffing_insights(conn, stats_by_store: dict) -> None:
     """把濃縮結論寫進 store_staffing_insights，只有這張表存在時才寫
     （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。
     summary_text 是完整版（本機 app.py 專用，含真實人事成本等數字，不可同步上雲端）；
-    public_summary_text 是只放預估可節省金額的公開安全版（migrate_layer2_to_turso.py
+    public_summary_text 是只放預估可節省金額的公開安全版（build_cloud_snapshot.py
     只會同步這一欄）。"""
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='store_staffing_insights'"

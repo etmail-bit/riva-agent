@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
-"""一次性搬遷腳本：把本機真實資料（daily_revenue_validated／monthly_cost_actuals／
-monthly_pnl／store_staffing_insights 的公開安全摘要／排班彙總結果）灌進 Turso 雲端
-資料庫，讓 app_pnl.py 雲端版真正有資料可用（之前 Turso 上只有 stores 兩筆代號的空殼
-資料庫）。
+"""產生雲端安全版資料庫快照：把本機真實資料（daily_revenue_validated／monthly_cost_actuals／
+monthly_pnl／store_staffing_insights 的公開安全摘要／排班彙總結果）寫進一份獨立的 SQLite
+檔案，讓 app_pnl.py 雲端版有資料可用。
+
+2026-07-13 汰換 Turso：原本這支腳本是把資料同步進 Turso 雲端資料庫（即時連線服務），
+但 Turso 這個資料庫實例當天發生持續性的 502（連 Turso 官方 CLI 都連不上，確認是
+服務端問題，見 PROGRESS.md「Turso 資料庫 502 故障排查記錄」一節），導致雲端網站
+整個打不開。既然雲端這邊本來就是「一個月同步一次」的唯讀展示用途，不需要一個
+「一直在線上運作」的資料庫服務去承擔額外的可用性風險，改成本機產生一份小型
+SQLite 快照檔案（目前約 200KB），Base64 編碼後直接存進 Streamlit Cloud 的 Secrets，
+app_pnl.py 啟動時解碼寫成暫存檔用 sqlite3 開啟——完全不依賴任何外部資料庫服務，
+也就不會再被第三方服務的可用性問題拖累。舊的 scripts/turso_client.py／Turso 相關
+Secrets（TURSO_DATABASE_URL／TURSO_AUTH_TOKEN）都已停用。
 
 刻意不搬 Layer 1 原始報表（收銀機/發票/銷售明細）與 raw_staffing_actual（逐日逐員工
 排班原始表）——這些永遠只留在本機，見 db/schema_cloud.sql 的說明。monthly_pnl
@@ -25,38 +34,58 @@ roster_mode_by_weekday() 跑完，只把彙總後、不含 employee_code／busin
 跟 employee_roles/wages 本身永遠不會離開這台機器。見 migrate_staffing_comparison()／
 migrate_roster_mode()。
 
-冪等：全部用 INSERT ... ON CONFLICT DO UPDATE，可重複執行不會產生重複資料，
-本機資料異動後（例如訂正某天營收、重跑 calculate_pnl.py、匯入新一批排班資料）重跑
-這支腳本即可同步最新狀態到雲端。
+冪等：全部用 INSERT ... ON CONFLICT DO UPDATE，可重複執行不會累積重複資料，
+本機資料異動後（例如訂正某天營收、重跑 calculate_pnl.py、匯入新一批排班資料、
+改動 config/staffing_rules.json 的排班參數）重跑這支腳本即可重新產生最新快照，
+再把印出來的 Base64 內容貼進 Streamlit Cloud Secrets 的 DB_SNAPSHOT_B64。
 
 用法：
     source .venv/bin/activate
-    python3 -m scripts.migrate_layer2_to_turso
+    python3 -m scripts.build_cloud_snapshot
 """
+import base64
 import sqlite3
+import subprocess
 from datetime import date
 from pathlib import Path
 
-from dotenv import load_dotenv
-
+from scripts.analyze_operations import hourly_channel_by_weekday
 from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, roster_mode_by_weekday
 from scripts.calculate_staffing import load_config as load_staffing_config
-from scripts.analyze_operations import hourly_channel_by_weekday
 from scripts.compare_staffing import compare as compare_staffing
 from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
-from scripts.turso_client import TursoConnection
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
 SCHEMA_CLOUD_PATH = ROOT / "db" / "schema_cloud.sql"
-
-load_dotenv(ROOT / ".env")
+SNAPSHOT_PATH = ROOT / "db" / "cloud_snapshot.db"  # db/**/*.db 已被 .gitignore 排除
 
 
 def _local_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def _snapshot_conn():
+    """建一份全新的快照檔案（每次重跑都從空的開始，避免舊資料殘留跟新資料混在一起）。"""
+    if SNAPSHOT_PATH.exists():
+        SNAPSHOT_PATH.unlink()
+    conn = sqlite3.connect(SNAPSHOT_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def migrate_stores(local, cloud):
+    """stores（店別代號 A／B）以前是手動建在 Turso 上的，這支腳本從來沒自動處理過
+    這張表——現在快照檔案是從空白重新產生，一定要記得帶這張表，不然店別選單會是空的。"""
+    rows = local.execute("SELECT store_id FROM stores").fetchall()
+    for r in rows:
+        cloud.execute(
+            "INSERT INTO stores (store_id) VALUES (?) ON CONFLICT(store_id) DO NOTHING",
+            (r["store_id"],),
+        )
+    return len(rows)
 
 
 def ensure_schema(cloud):
@@ -381,30 +410,54 @@ def migrate_roster_mode(local, cloud, staffing_config):
 
 def main():
     local = _local_conn()
-    cloud = TursoConnection()
+    cloud = _snapshot_conn()
     ensure_schema(cloud)
     staffing_config = load_staffing_config()
 
+    n0 = migrate_stores(local, cloud)
+    print(f"stores: {n0} 筆已寫入快照")
     n1 = migrate_daily_revenue_validated(local, cloud)
-    print(f"daily_revenue_validated: {n1} 筆已同步到 Turso")
+    print(f"daily_revenue_validated: {n1} 筆已寫入快照")
     n2 = migrate_monthly_cost_actuals(local, cloud)
-    print(f"monthly_cost_actuals: {n2} 筆已同步到 Turso")
+    print(f"monthly_cost_actuals: {n2} 筆已寫入快照")
     n3 = migrate_monthly_pnl(local, cloud)
-    print(f"monthly_pnl: {n3} 筆已同步到 Turso")
+    print(f"monthly_pnl: {n3} 筆已寫入快照")
     n4 = migrate_staffing_insights(local, cloud)
-    print(f"store_staffing_insights（僅公開安全版摘要）: {n4} 筆已同步到 Turso")
+    print(f"store_staffing_insights（僅公開安全版摘要）: {n4} 筆已寫入快照")
     n5 = migrate_hourly_pattern_monthly(local, cloud)
-    print(f"raw_hourly_pattern_monthly: {n5} 筆已同步到 Turso")
+    print(f"raw_hourly_pattern_monthly: {n5} 筆已寫入快照")
     n6 = migrate_hourly_pattern_daily(local, cloud)
-    print(f"raw_hourly_pattern_daily: {n6} 筆已同步到 Turso")
+    print(f"raw_hourly_pattern_daily: {n6} 筆已寫入快照")
     n7 = migrate_staffing_comparison(local, cloud, staffing_config)
-    print(f"staffing_hourly_comparison（彙總快照）: {n7} 筆已同步到 Turso")
+    print(f"staffing_hourly_comparison（彙總快照）: {n7} 筆已寫入快照")
     n8 = migrate_roster_mode(local, cloud, staffing_config)
-    print(f"staffing_roster_mode（彙總快照）: {n8} 筆已同步到 Turso")
+    print(f"staffing_roster_mode（彙總快照）: {n8} 筆已寫入快照")
     n9 = migrate_staffing_comparison_yearly(local, cloud, staffing_config)
-    print(f"staffing_hourly_comparison_yearly（全年彙總快照）: {n9} 筆已同步到 Turso")
+    print(f"staffing_hourly_comparison_yearly（全年彙總快照）: {n9} 筆已寫入快照")
     n10 = migrate_channel_by_weekday(local, cloud)
-    print(f"staffing_channel_by_weekday（星期幾發票張數/營業額快照）: {n10} 筆已同步到 Turso")
+    print(f"staffing_channel_by_weekday（星期幾發票張數/營業額快照）: {n10} 筆已寫入快照")
+
+    cloud.commit()
+    cloud.close()
+
+    raw_bytes = SNAPSHOT_PATH.read_bytes()
+    b64 = base64.b64encode(raw_bytes).decode()
+    print(f"\n快照檔案：{SNAPSHOT_PATH}（{len(raw_bytes):,} bytes）")
+    print(f"Base64 編碼長度：{len(b64):,} 字元")
+
+    secret_line = f'DB_SNAPSHOT_B64 = "{b64}"'
+    try:
+        subprocess.run(["pbcopy"], input=secret_line.encode(), check=True)
+        print(
+            "\n已經把完整這一行（DB_SNAPSHOT_B64 = \"...\"）直接複製到剪貼簿"
+            "（用 pbcopy，不經過終端機顯示，不會有換行被誤複製的問題）。\n"
+            "接下來請到 Streamlit Cloud 後台的 Secrets：\n"
+            "  1. 刪掉 TURSO_DATABASE_URL、TURSO_AUTH_TOKEN 這兩行（已經不需要了）\n"
+            "  2. 直接貼上（Cmd+V）剪貼簿內容，會整行貼進去，不用自己補 key 名稱或引號\n"
+            "  3. 存檔，等它自動重啟"
+        )
+    except Exception as e:
+        print(f"\npbcopy 失敗（{e}），請自行複製上面印出的 Base64 內容並手動組成 DB_SNAPSHOT_B64 = \"...\" 這一行。")
 
 
 if __name__ == "__main__":

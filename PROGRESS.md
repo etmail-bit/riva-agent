@@ -435,3 +435,19 @@ turso db shell riva-agent-pnl "SELECT 1;"
 如果回傳結果而不是 502 錯誤，代表 Turso 已經恢復，可以接著跑 `python3 -m scripts.migrate_layer2_to_turso` 補完上一節提到的快照同步。如果還是 502，考慮透過 Turso 的支援管道（免費方案通常是 Discord/email）回報，附上資料庫 ID `019f4071-f501-786a-9aaf-2f6151920680` 跟錯誤訊息。
 
 **本機網站完全不受此故障影響**（`app.py` 讀本機 SQLite，跟 Turso 無關），這段期間排班/月盈虧功能都可以正常用本機版本。
+
+## 汰換 Turso：雲端改用本機產生的資料庫快照（2026-07-13 完成）
+
+上一節的 Turso 故障沒有等到它自己恢復——使用者反問「除了 Turso 還有什麼方式可以呈現網頁」，討論後決定**直接不用任何外部即時連線資料庫服務**，因為雲端這邊本來就是「一個月同步一次」的唯讀展示用途，用一個「一直在線上運作」的第三方服務去承擔額外可用性風險並不划算——真正的修法不是換一家資料庫廠商繼續賭運氣，是把「依賴第三方服務今天有沒有掛」這整個風險類別移除掉。
+
+**新架構**：`scripts/migrate_layer2_to_turso.py` 改名（`git mv`，保留開發歷史）成 `scripts/build_cloud_snapshot.py`，功能從「同步資料進 Turso」改成「產生一份本機 SQLite 快照檔案（`db/cloud_snapshot.db`，已在 `.gitignore`）」，內容涵蓋跟以前 Turso 上一樣的 10 類彙總安全資料（外加原本從沒自動同步過、這次一併補上的 `stores` 店別代號表——這張表以前是手動建在 Turso 上的，這是這次順便補的既有缺口）。跑完會把快照整份 Base64 編碼、直接用 `pbcopy` 複製成 `DB_SNAPSHOT_B64 = "..."` 這一行（約 256KB），使用者只要貼進 Streamlit Cloud 的 Secrets 就完成同步，不需要再另外對任何雲端資料庫執行 `ALTER TABLE`（因為快照每次都是從 `db/schema_cloud.sql` 全新重建）。
+
+`app_pnl.py` 的 `get_db_connection()` 改成：優先讀 Secrets 的 `DB_SNAPSHOT_B64`，Base64 解碼後寫成暫存檔用 `sqlite3` 開啟；本機測試時 fallback 直接讀 `db/cloud_snapshot.db`。因為當初 `scripts/turso_client.py` 設計時就刻意模仿 `sqlite3.Connection` 的介面（`conn.execute(sql, params).fetchall()`），這次拿掉 Turso、換成一般 SQLite 連線，`app_pnl.py` 裡所有查詢程式碼**一行都沒改**，只有函式簽名的型別標註（`TursoConnection` → `sqlite3.Connection`）跟著調整。`scripts/turso_client.py` 已刪除。
+
+已完整驗證：本機模擬雲端模式（不連任何外部服務，純讀本機快照檔案）登入、月盈虧頁、排班摘要頁（含這次新增的全年彙總、星期幾發票張數/營業額兩個區塊）都正確顯示、console 0 錯誤，數字跟本機資料庫直接查詢的結果一致。
+
+**同步更新的文件**：`.claude/skills/monthly-ops-refresh/references/cloud_deployment.md`／`SKILL.md`／`zero_leakage_gates.md` 裡所有提到 Turso 同步流程的地方都已改成新腳本名稱跟新流程說明（零洩漏鐵則本身沒變：`build_cloud_snapshot.py` 依然絕對不能自己決定要不要跑，一定要當次明確經使用者同意）。
+
+**待確認/待辦**：
+- 使用者需要自己去 Streamlit Cloud 後台刪掉 `TURSO_DATABASE_URL`／`TURSO_AUTH_TOKEN` 兩把不再需要的 Secrets，貼上新的 `DB_SNAPSHOT_B64`
+- `app_pnl.py` 裡「儲存為本月實際值」／「儲存本月盈虧結果」／手動輸入月營收這幾個寫入按鈕，改用暫存檔快照後**還是技術上可以點、但寫入只會留在那次 session 的暫存檔裡，不會真正持久化**（下次重啟或快取失效就消失）——這跟使用者稍早提過「不想讓前端能寫資料庫」的方向一致，但目前只是「寫了也沒用」，不是「介面上就看不到」，UX 上可能造成「已儲存」的錯誤印象，之後有空可以考慮乾脆把這幾個寫入按鈕從雲端版拿掉。

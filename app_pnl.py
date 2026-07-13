@@ -6,16 +6,19 @@
     raw_staffing_actual（逐日逐員工明細）與 config 的 wages／employee_roles
     永遠不會被這支程式碰到，見 render_staffing_summary_page() 的說明。
 
-資料庫改用 Turso（雲端，透過 scripts/turso_client.py 的 HTTP 翻譯層），
-不是本機的 db/riva_agent.db。
+資料庫讀的是雲端安全版快照（見 get_db_connection() 說明），不是本機的
+db/riva_agent.db；快照由 scripts/build_cloud_snapshot.py 產生。
 
 帳號設定檔是 config/auth_config.yaml（不進版控），一律用
 scripts/manage_accounts.py 管理帳號，不要手動編輯。
 """
+import base64
 import copy
 import json
 import os
 import re
+import sqlite3
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -32,7 +35,6 @@ from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_dat
 from scripts.calculate_staffing import load_config as load_staffing_config_local
 from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
-from scripts.turso_client import TursoConnection
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config" / "auth_config.yaml"
@@ -95,14 +97,24 @@ def load_staffing_rules_config() -> dict:
 
 
 @st.cache_resource
-def get_db_connection() -> TursoConnection:
-    return TursoConnection(
-        url=_get_secret("TURSO_DATABASE_URL"),
-        token=_get_secret("TURSO_AUTH_TOKEN"),
-    )
+def get_db_connection() -> sqlite3.Connection:
+    """2026-07-13 汰換 Turso（見 scripts/build_cloud_snapshot.py 檔頭說明）：雲端部署時，
+    資料庫快照整份存在 Secrets 的 DB_SNAPSHOT_B64（Base64 編碼），解碼寫成暫存檔後用
+    sqlite3 開啟，不再依賴任何外部資料庫服務的即時連線。本機測試時沒有這把 Secrets key，
+    fallback 直接讀 build_cloud_snapshot.py 產生的本機檔案 db/cloud_snapshot.db，
+    跟雲端走同一套 SQL 查詢程式碼。"""
+    try:
+        raw = base64.b64decode(st.secrets["DB_SNAPSHOT_B64"])
+        db_path = Path(tempfile.gettempdir()) / "riva_agent_cloud_snapshot.db"
+        db_path.write_bytes(raw)
+    except Exception:
+        db_path = ROOT / "db" / "cloud_snapshot.db"
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def render_manual_revenue_section(conn: TursoConnection, store_id: str) -> None:
+def render_manual_revenue_section(conn: sqlite3.Connection, store_id: str) -> None:
     st.caption(
         "只有在該月「完全沒有」POS 匯入資料時，這裡填的數字才會被拿去算月盈虧；"
         "POS 資料（daily_revenue_validated）永遠優先，不會被這裡的輸入覆蓋。"
@@ -202,7 +214,7 @@ def render_manual_revenue_section(conn: TursoConnection, store_id: str) -> None:
             st.rerun()
 
 
-def render_combined_pnl_page(conn: TursoConnection, stores: list) -> None:
+def render_combined_pnl_page(conn: sqlite3.Connection, stores: list) -> None:
     """兩店合計盈虧趨勢＋彙整建議。刻意不含本機版 app.py 才有的「營運報告」區塊——
     那份分析吃 Layer 1 原始明細（發票/收銀機明細），依零洩漏原則只留在本機。"""
     st.subheader("兩店合計盈虧趨勢")
