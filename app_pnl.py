@@ -597,14 +597,6 @@ def render_pnl_page() -> None:
     st.subheader(f"{store_id} 店　{year_month}")
     if result["revenue_source"] == "manual":
         st.caption("📝 本月營收數字來自手動輸入（沒有 POS 稽核過的資料），僅供參考。")
-    if result["labor_cost_source"] == "manual_actual":
-        st.caption("📝 人事成本＝手動輸入的底薪 × 概算保費負擔率。")
-    elif result["labor_cost_source"] == "estimate":
-        st.caption("📐 人事成本目前是概算值，僅供參考。")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("營收", f"{result['revenue']:,}")
-    col2.metric("稅前淨利", f"{result['pretax_profit']:,}")
-    col3.metric("稅後淨利", f"{result['net_profit']:,}")
 
     saved_pnl = conn.execute(
         "SELECT revenue, cogs, material_waste, platform_commission, payment_processing_fee, "
@@ -613,15 +605,34 @@ def render_pnl_page() -> None:
         "FROM monthly_pnl WHERE store_id = ? AND year_month = ?",
         (store_id, year_month),
     ).fetchone()
+
+    # 2026-07-14 修正：最上面三個大數字之前永遠顯示「即時試算」，下面明細表改抓已儲存
+    # 版本之後，同一頁會出現兩個不同的「稅前淨利」，非常容易誤會。現在兩處統一用同一個
+    # 來源（`display`）決定——有已儲存紀錄就都用那份（比較穩定，可能含即時試算算不出來
+    # 的真實薪資），沒有才 fallback 用即時試算，不會再各自抓不同來源。
+    display = saved_pnl if saved_pnl is not None else result
+    saved_tag = "（已儲存版本）" if saved_pnl is not None else ""
+    if display["labor_cost_source"] == "real_payroll":
+        st.caption(f"✅ 人事成本是真實薪資計算結果{saved_tag}。")
+    elif display["labor_cost_source"] == "manual_actual":
+        st.caption(f"📝 人事成本＝手動輸入的底薪 × 概算保費負擔率{saved_tag}。")
+    elif display["labor_cost_source"] == "estimate":
+        st.caption(f"📐 人事成本目前是概算值，僅供參考{saved_tag}。")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("營收", f"{display['revenue']:,}")
+    col2.metric("稅前淨利", f"{display['pretax_profit']:,}")
+    col3.metric("稅後淨利", f"{display['net_profit']:,}")
+
     if saved_pnl is None:
         st.caption("尚未儲存正式紀錄，以上是即時試算結果，按下面按鈕可寫入 monthly_pnl。")
     elif saved_pnl["net_profit"] != result["net_profit"]:
         st.caption(
-            f"⚠️ 已儲存的正式紀錄（稅後淨利 {saved_pnl['net_profit']:,}，"
-            f"{saved_pnl['calculated_at']}）跟目前試算結果不同，按下面按鈕可更新成目前這個版本。"
+            f"⚠️ 以上是已儲存的正式紀錄（{saved_pnl['calculated_at']}）。"
+            f"目前試算結果不同（稅後淨利 {result['net_profit']:,}），按下面按鈕可更新成目前這個版本。"
         )
     else:
-        st.caption(f"✅ 目前試算結果跟已儲存的正式紀錄一致（最後計算時間 {saved_pnl['calculated_at']}）")
+        st.caption(f"✅ 以上跟目前試算結果一致（最後計算時間 {saved_pnl['calculated_at']}）")
 
     if st.button("儲存本月盈虧結果", key="save_pnl_result"):
         save_pnl_result(conn, store_id, year_month, result)
@@ -646,22 +657,10 @@ def render_pnl_page() -> None:
             ("稅後淨利", d["net_profit"]),
         ]
 
-    # 2026-07-14 修正：這張明細表之前永遠顯示「即時試算」結果，雲端試算不到真實薪資
-    # （raw_staffing_actual 不同步上雲），導致就算 monthly_pnl 已經存了真實金額，
-    # 使用者在這張表上永遠只看得到概算值，誤以為「沒有更新」。改成：有已儲存紀錄
-    # 就優先顯示那份的明細（含真實金額來源標記），即時試算結果只有在跟已儲存紀錄
-    # 不同時才另外用展開區塊顯示，避免兩張長得很像的表同時攤開造成混淆。
-    if saved_pnl is not None:
-        if saved_pnl["labor_cost_source"] == "real_payroll":
-            st.caption("✅ 下面明細的人事成本是真實薪資計算結果（已儲存版本）。")
-        elif saved_pnl["labor_cost_source"] == "manual_actual":
-            st.caption("📝 下面明細的人事成本是手動輸入底薪 × 概算保費（已儲存版本）。")
-        st.dataframe(pd.DataFrame(_breakdown_rows(saved_pnl), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
-        if saved_pnl["net_profit"] != result["net_profit"]:
-            with st.expander("目前試算結果明細（參數或資料來源跟已儲存版本不同才會出現差異）"):
-                st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
-    else:
-        st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(_breakdown_rows(display), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+    if saved_pnl is not None and saved_pnl["net_profit"] != result["net_profit"]:
+        with st.expander("目前試算結果明細（參數或資料來源跟已儲存版本不同才會出現差異）"):
+            st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
 
     st.subheader(f"{store_id} 店歷史走勢")
     history = conn.execute(
