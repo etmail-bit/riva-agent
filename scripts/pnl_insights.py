@@ -4,6 +4,7 @@
 符合零洩漏原則（真實數字只活在資料庫，不進版控的原始碼）。app.py／app_pnl.py
 共用這支模組，避免本機版跟雲端版各寫一份分析邏輯。
 """
+import sqlite3
 
 
 def add_total_row(records: list, label_col: str, sum_cols: list, label_value: str = "累計") -> list:
@@ -205,9 +206,17 @@ def generate_pnl_insights(conn) -> str:
             line += f"（其中 {s['manual_months']} 個月營收是手動輸入、非 POS 稽核過，數字僅供參考）"
 
         if _table_exists(conn, "store_operational_insights"):
-            op_row = conn.execute(
-                "SELECT summary_text FROM store_operational_insights WHERE store_id = ?", (sid,)
-            ).fetchone()
+            # 2026-07-14：雲端安全版的 store_operational_insights 沒有 summary_text
+            # 欄位（那欄含真實客單價金額，只留本機），只有 public_summary_text——
+            # 這裡接住 sqlite3.OperationalError，雲端就直接跳過這句，不會整頁掛掉，
+            # 安全版的通路/回頭客/客單價指數改由 app_pnl.render_operational_insights()
+            # 另外一個獨立區塊顯示，不在這句話裡重複塞一次。
+            try:
+                op_row = conn.execute(
+                    "SELECT summary_text FROM store_operational_insights WHERE store_id = ?", (sid,)
+                ).fetchone()
+            except sqlite3.OperationalError:
+                op_row = None
             if op_row is not None:
                 line += f" {dict(op_row)['summary_text']}"
 
