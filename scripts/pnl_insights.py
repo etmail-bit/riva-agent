@@ -121,6 +121,15 @@ def _pinpoint_worst_month(records: list) -> dict | None:
 
 
 def _has_any_cost_actuals(conn) -> bool:
+    # 2026-07-14 修正：真實人事成本現在也可能來自 calculate_payroll.py 的逐員工反推
+    # （monthly_pnl.labor_cost_source = 'real_payroll'），不是只有手動填 monthly_cost_actuals
+    # 這一種管道——只查 monthly_cost_actuals 會漏掉這種情況，讓警語誤判成「完全靠概算」。
+    real_payroll_row = conn.execute(
+        "SELECT COUNT(*) AS c FROM monthly_pnl WHERE labor_cost_source = 'real_payroll'"
+    ).fetchone()
+    if real_payroll_row["c"] > 0:
+        return True
+
     columns = [
         "labor_actual", "cogs_actual", "utilities_actual", "rent_actual",
         "franchise_amortization_actual",

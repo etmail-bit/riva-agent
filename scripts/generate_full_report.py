@@ -37,6 +37,7 @@ from scripts.estimate_staffing_cost import compute_store_stats
 from scripts.estimate_staffing_cost import get_periods as get_cost_periods
 from scripts.calculate_pnl import load_config as load_cost_config
 from scripts.estimate_staffing_cost import persist_staffing_insights
+from scripts.pnl_insights import generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
@@ -229,6 +230,25 @@ def build_daytype_section(conn, store_ids, config) -> str:
     return "\n".join(lines)
 
 
+def build_executive_summary(conn, today_str) -> str:
+    """重點摘要（2026-07-14 新增）：只放「做決策會看」的結論，不含逐時段/逐員工技術
+    明細，也不含薪資計算（使用者明確要求排除）。直接重用 generate_pnl_insights()——
+    這支既有函式的「各店經營現況」段落本身就已經把營運（通路/客單價/回頭客）跟排班
+    （可省成本）的濃縮結論嵌進同一段敘述裡了，這裡不再另外拆分小節重複列一次同樣的
+    句子。呼叫端要先跑完 persist_operational_insights()／persist_staffing_insights()，
+    這裡才讀得到最新資料。"""
+    return "\n".join([
+        f"# 重點摘要（{today_str} 產出）",
+        "",
+        "只列「做決策會看」的結論，逐時段/逐員工技術明細跟薪資計算請看完整版"
+        f"`月度總報告_{today_str}.md`；報表去哪裡看什麼，見 `00_報表總覽.md`。",
+        "",
+        "---",
+        "",
+        generate_pnl_insights(conn),
+    ])
+
+
 def main():
     conn = _conn()
     store_ids = _stores(conn)
@@ -287,10 +307,19 @@ def main():
     insurance_config = load_insurance_rates_config()
     lines_str += build_payroll_section(conn, store_ids, staffing_config, insurance_config)
 
+    today_str = date.today().isoformat()
     REPORTS_DIR.mkdir(exist_ok=True)
-    out_path = REPORTS_DIR / f"月度總報告_{date.today().isoformat()}.md"
+    out_path = REPORTS_DIR / f"月度總報告_{today_str}.md"
     out_path.write_text(lines_str, encoding="utf-8")
     print(f"月度總報告已寫入 {out_path}")
+
+    # 2026-07-14 新增：重點摘要要放在 persist_operational_insights()／persist_staffing_insights()
+    # 都跑完之後才產生，這樣讀到的 store_operational_insights／store_staffing_insights
+    # 才是這次跑出來的最新結論，不是上一輪殘留的舊資料。
+    summary_path = REPORTS_DIR / f"重點摘要_{today_str}.md"
+    summary_path.write_text(build_executive_summary(conn, today_str), encoding="utf-8")
+    print(f"重點摘要已寫入 {summary_path}")
+
     conn.close()
 
 
