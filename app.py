@@ -1117,6 +1117,57 @@ def render_hourly_pattern_page() -> None:
                 hide_index=True, use_container_width=True,
             )
 
+        # 2026-07-14 使用者要求：除了單一星期幾切換，下面再加平日/假日各自彙整的圖，
+        # 「平均建議人力」「平均估計杯數」是 estimate_staffing_by_weekday() 早就算好、
+        # 一直沒接進畫面的 daytype_avg（五個平日或兩個假日各自的平均）；「實際人力」
+        # 這裡另外用同一組 roster_by_hour（星期幾眾數）取平均湊出來，跟上面單一星期幾
+        # 圖表的「實際人力」同一個資料來源，只是這裡是那幾天的平均，不是單一天。
+        st.markdown("**平日／假日彙整**")
+        daytype_weekdays = {**{wd: "平日" for wd in WEEKDAY_NAMES[:5]}, **{wd: "假日" for wd in WEEKDAY_NAMES[5:]}}
+        for daytype in ("平日", "假日"):
+            avg_rows = weekday_staffing["daytype_avg"][daytype]
+            if not avg_rows:
+                st.info(f"{store_id} 店目前沒有{daytype}的估計資料可以彙整。")
+                continue
+            wds_in_group = [wd for wd, dt in daytype_weekdays.items() if dt == daytype]
+            daytype_merged = []
+            for r in avg_rows:
+                hour_slot = r["時段"]
+                roster_cell = roster_by_hour.get(hour_slot)
+                actual_vals = []
+                if roster_cell is not None:
+                    for wd in wds_in_group:
+                        ft = roster_cell.get(f"星期{wd}_正職")
+                        pt = roster_cell.get(f"星期{wd}_兼職")
+                        if ft is not None and pt is not None:
+                            actual_vals.append(ft + pt)
+                actual = round(sum(actual_vals) / len(actual_vals), 2) if actual_vals else None
+                daytype_merged.append({
+                    "時段": hour_slot,
+                    "建議人力": r["平均建議人力"],
+                    "實際人力": actual,
+                    "估計杯數": r["平均估計杯數"],
+                })
+            st.caption(f"{daytype}（{'、'.join(f'星期{wd}' for wd in wds_in_group)} 平均）")
+            daytype_bar_df = pd.DataFrame(
+                [{"時段": r["時段"], "類別": "建議人力", "人力": r["建議人力"]} for r in daytype_merged]
+                + [{"時段": r["時段"], "類別": "實際人力", "人力": r["實際人力"]} for r in daytype_merged]
+            )
+            daytype_line_df = pd.DataFrame([{"時段": r["時段"], "估計杯數": r["估計杯數"]} for r in daytype_merged])
+            daytype_weekday_chart = build_bar_line_combo_chart(
+                daytype_bar_df, "時段", "人力", "人力（人）",
+                daytype_line_df, "估計杯數", "估計杯數（杯，推算值）",
+                bar_category_field="類別",
+                bar_domain=["建議人力", "實際人力"],
+                bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(daytype_weekday_chart, use_container_width=True)
+        st.caption(
+            "「建議人力」「估計杯數」是該組（平日一~五或假日六日）逐天平均值；「實際人力」是"
+            "各天星期幾眾數的平均，兩者都是同一批推算/眾數資料的彙整，不是重新反推的獨立數字。"
+        )
+
     st.subheader("星期幾 x 時段：發票張數與營業額")
     weekday_rows = hourly_channel_by_weekday(conn, store_id)
     if not weekday_rows:
