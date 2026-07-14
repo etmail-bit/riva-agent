@@ -183,6 +183,43 @@ def weekday_daily_summary(conn, store_id):
     return result
 
 
+def public_weekday_summary(conn, store_id):
+    """雲端安全版星期幾彙整（2026-07-14 新增）：把 weekday_daily_summary() 的真實金額／
+    真實發票張數改成「相對星期五的百分比差異」（星期五當基準＝0%，使用者指定用星期五
+    當 base，因為星期五通常是平日轉假日的過渡日，拿來當比較基準）——不會出現任何真實
+    金額或真實發票張數，最大/最小值發生的日期保留（日期本身不是金額，看得出「哪天
+    異常」但看不出「異常到什麼金額」）。"""
+    rows = weekday_daily_summary(conn, store_id)
+    if not rows:
+        return []
+    friday = next((r for r in rows if r["星期"] == "五"), None)
+    if friday is None or not friday["營業額中位數"] or not friday["發票中位數"]:
+        return []
+    rev_base = friday["營業額中位數"]
+    inv_base = friday["發票中位數"]
+
+    def pct_vs_friday(value, base):
+        return round((value - base) / base * 100, 1)
+
+    return [
+        {
+            "星期": r["星期"],
+            "天數": r["天數"],
+            "營業額中位數_vs星期五": pct_vs_friday(r["營業額中位數"], rev_base),
+            "營業額最小_vs星期五": pct_vs_friday(r["營業額最小"], rev_base),
+            "營業額最小日期": r["營業額最小日期"],
+            "營業額最大_vs星期五": pct_vs_friday(r["營業額最大"], rev_base),
+            "營業額最大日期": r["營業額最大日期"],
+            "發票中位數_vs星期五": pct_vs_friday(r["發票中位數"], inv_base),
+            "發票最小_vs星期五": pct_vs_friday(r["發票最小"], inv_base),
+            "發票最小日期": r["發票最小日期"],
+            "發票最大_vs星期五": pct_vs_friday(r["發票最大"], inv_base),
+            "發票最大日期": r["發票最大日期"],
+        }
+        for r in rows
+    ]
+
+
 def repeat_customer_stats(conn, store_id):
     """回頭客分析（2026-07-10 新增）。carrier_no（手機載具號碼）視同客戶個資等級的識別碼，
     只在這裡當 GROUP BY 的內部 key 用，從頭到尾不把原始 carrier_no 存進回傳值或報告——

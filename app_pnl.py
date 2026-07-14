@@ -21,6 +21,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 import streamlit_authenticator as stauth
@@ -31,9 +32,16 @@ from yaml.loader import SafeLoader
 from scripts.analyze_staffing_daytype import HOUR_SLOTS, WEEKDAY_NAMES, cup_stats_by_daytype
 from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
 from scripts.calculate_pnl import load_config as load_pnl_config
-from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data
+from scripts.calculate_staffing import (
+    calculate_delivery_hours,
+    calculate_hourly_staffing,
+    get_hourly_data,
+    is_tea_brewing_hour,
+    required_front_staff_for_hour,
+)
 from scripts.calculate_staffing import load_config as load_staffing_config_local
 from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
+from scripts.estimate_staffing_by_weekday import avg_delivery_by_hour
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
@@ -730,7 +738,8 @@ def render_staffing_summary_page() -> None:
                 "時段": f"{hour_slot}:00",
                 "日均杯數": staffing[hour_slot]["cups"],
                 "建議前場人力": staffing[hour_slot]["required_front_staff"],
-                "煮茶": "煮茶 +1" if staffing[hour_slot]["tea_brewing"] else "",
+                "公式（取整前）": staffing[hour_slot]["required_front_staff_formula"],
+                "開早班": "Y" if staffing[hour_slot]["tea_brewing"] else "",
                 "日均外送單": staffing[hour_slot]["delivery_count"],
                 "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
             }
@@ -738,8 +747,9 @@ def render_staffing_summary_page() -> None:
         ]
         st.dataframe(pd.DataFrame(hourly_rows), hide_index=True, use_container_width=True)
         st.caption(
-            "「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能。"
-            "「建議前場人力」已經把外送耗時併進需求：ceil(杯數/產能 + 外送耗時小時數)"
+            "「開早班」欄有標記的時段，那個人整段班次前場產能只算8杯/hr（其他人一律全產能），"
+            "「建議前場人力」已經是總人數（含這個人），不用再另外+1。"
+            "已經把外送耗時併進需求：開早班時段 ceil(max(0,杯數-8)/產能 + 外送耗時) + 1，其餘時段 ceil(杯數/產能 + 外送耗時)"
         )
 
     st.subheader(f"{store_id} 店　平日/假日逐時段杯數")
@@ -754,19 +764,95 @@ def render_staffing_summary_page() -> None:
     if not daytype_stats["平日"] and not daytype_stats["假日"]:
         st.info(f"{store_id} 店目前雲端沒有可拆分平日/假日的樣本資料。")
     else:
-        col_wd, col_we = st.columns(2)
-        with col_wd:
-            st.caption("平日（反推值）")
-            st.dataframe(pd.DataFrame(daytype_stats["平日"]), hide_index=True, use_container_width=True)
-        with col_we:
-            st.caption("假日（真實樣本平均）")
-            st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
+        wd_by_hour = {row["時段"]: row for row in daytype_stats["平日"]}
+        we_by_hour = {row["時段"]: row for row in daytype_stats["假日"]}
+        all_hours = sorted(set(wd_by_hour) | set(we_by_hour))
+        merged_rows = [
+            {
+                "時段": h,
+                "平日_月數": wd_by_hour.get(h, {}).get("月數"),
+                "假日_月數": we_by_hour.get(h, {}).get("月數"),
+                "平日_平均杯數": wd_by_hour.get(h, {}).get("平均杯數"),
+                "假日_平均杯數": we_by_hour.get(h, {}).get("平均杯數"),
+                "平日_最大值": wd_by_hour.get(h, {}).get("最大值"),
+                "假日_最大值": we_by_hour.get(h, {}).get("最大值"),
+                "平日_最小值": wd_by_hour.get(h, {}).get("最小值"),
+                "假日_最小值": we_by_hour.get(h, {}).get("最小值"),
+            }
+            for h in all_hours
+        ]
+        st.dataframe(pd.DataFrame(merged_rows), hide_index=True, use_container_width=True)
+        chart_df = pd.DataFrame(
+            [{"時段": h, "類型": "平日", "平均杯數": wd_by_hour[h]["平均杯數"]} for h in all_hours if h in wd_by_hour]
+            + [{"時段": h, "類型": "假日", "平均杯數": we_by_hour[h]["平均杯數"]} for h in all_hours if h in we_by_hour]
+        )
+        daytype_cups_chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=True, strokeWidth=2)
+            .encode(
+                x=alt.X("時段:N", title="時段"),
+                y=alt.Y("平均杯數:Q", title="平均杯數（杯）"),
+                color=alt.Color("類型:N", legend=alt.Legend(title=None)),
+                tooltip=["時段", "類型", "平均杯數"],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(daytype_cups_chart, use_container_width=True)
 
     st.subheader(f"{store_id} 店　實際 vs 建議人力比對")
-    compare_mode = st.radio("比對範圍", ["單月", "全年彙總（排除2月）"], horizontal=True, key="staffing_compare_mode")
+    compare_mode = st.radio(
+        "比對範圍", ["單月", "全年彙總（排除2月）", "平日/假日拆分（真實資料）"],
+        horizontal=True, key="staffing_compare_mode",
+    )
 
-    months_note = ""
-    if compare_mode == "單月":
+    if compare_mode == "平日/假日拆分（真實資料）":
+        daytype_rows = conn.execute(
+            "SELECT daytype, hour_slot, cups, recommended, formula, actual, diff "
+            "FROM staffing_hourly_comparison_daytype WHERE store_id = ? ORDER BY daytype, hour_slot",
+            (store_id,),
+        ).fetchall()
+        if not daytype_rows:
+            st.info(f"{store_id} 店雲端還沒有平日/假日拆分快照，請先在本機執行同步腳本。")
+        else:
+            st.caption(
+                "杯量用真實星期六/日單日樣本反推，只涵蓋有這種樣本的月份，範圍比「全年彙總」窄，"
+                "但每個數字都是真實資料撐出來的。這是本機同步時算好的快照，不是即時重算。"
+            )
+            for daytype in ("平日", "假日"):
+                rows = [r for r in daytype_rows if r["daytype"] == daytype]
+                st.markdown(f"**{daytype}**")
+                if not rows:
+                    st.info(f"{store_id} 店目前沒有{daytype}的真實樣本可以比對。")
+                    continue
+                daytype_df = pd.DataFrame(
+                    [
+                        {
+                            "時段": f"{r['hour_slot']}:00",
+                            "建議人力": r["recommended"],
+                            "公式（取整前）": r["formula"],
+                            "實際平均人力": r["actual"],
+                            "差異": r["diff"],
+                        }
+                        for r in rows
+                    ]
+                )
+                st.dataframe(daytype_df, hide_index=True, use_container_width=True)
+                bar_df = pd.DataFrame(
+                    [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in rows]
+                    + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in rows]
+                )
+                line_df = pd.DataFrame([{"時段": r["hour_slot"], "日均杯數": r["cups"]} for r in rows])
+                daytype_chart = build_bar_line_combo_chart(
+                    bar_df, "時段", "人力", "人力（人）",
+                    line_df, "日均杯數", "日均杯數（杯）",
+                    bar_category_field="類別",
+                    bar_domain=["建議人力", "實際平均人力"],
+                    bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                    line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+                )
+                st.altair_chart(daytype_chart, use_container_width=True)
+        months_note = ""
+    elif compare_mode == "單月":
         comparison_rows = conn.execute(
             "SELECT hour_slot, recommended, actual, diff FROM staffing_hourly_comparison "
             "WHERE store_id = ? AND year_month = ? ORDER BY hour_slot",
@@ -793,33 +879,34 @@ def render_staffing_summary_page() -> None:
             cups_lookup = {}
         empty_message = "雲端還沒有全年彙總快照，請先在本機執行同步腳本。"
 
-    if not comparison_rows:
-        st.info(empty_message)
-    else:
-        comparison_df = pd.DataFrame(
-            [
-                {
-                    "時段": f"{r['hour_slot']}:00",
-                    "建議人力": r["recommended"],
-                    "實際平均人力": r["actual"],
-                    "差異": r["diff"],
-                }
-                for r in comparison_rows
-            ]
-        )
-        st.dataframe(comparison_df, hide_index=True, use_container_width=True)
-        st.caption(f"這是本機同步時算好的快照，不是即時重算——本機排班資料更新後要重新執行同步腳本，這裡才會跟著更新。{months_note}")
+    if compare_mode != "平日/假日拆分（真實資料）":
+        if not comparison_rows:
+            st.info(empty_message)
+        else:
+            comparison_df = pd.DataFrame(
+                [
+                    {
+                        "時段": f"{r['hour_slot']}:00",
+                        "建議人力": r["recommended"],
+                        "實際平均人力": r["actual"],
+                        "差異": r["diff"],
+                    }
+                    for r in comparison_rows
+                ]
+            )
+            st.dataframe(comparison_df, hide_index=True, use_container_width=True)
+            st.caption(f"這是本機同步時算好的快照，不是即時重算——本機排班資料更新後要重新執行同步腳本，這裡才會跟著更新。{months_note}")
 
-        chart_rows = [r for r in comparison_rows if r["actual"] is not None]
-        if chart_rows:
+            # 「建議人力」每個時段都有，不需要有實際資料才顯示；「實際平均人力」缺資料的
+            # 時段留 None，Altair 對 None 的數值長條不會畫（空白），不會擋住建議人力那根長條。
             bar_df = pd.DataFrame(
-                [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in chart_rows]
-                + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in chart_rows]
+                [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in comparison_rows]
+                + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in comparison_rows]
             )
             line_df = pd.DataFrame(
                 [
                     {"時段": r["hour_slot"], "日均杯數": cups_lookup[r["hour_slot"]]}
-                    for r in chart_rows
+                    for r in comparison_rows
                     if r["hour_slot"] in cups_lookup
                 ]
             )
@@ -888,6 +975,165 @@ def render_staffing_summary_page() -> None:
                 "「發票張數」是杯量的替代指標（目前沒有逐日、涵蓋一~日七天的真實杯數資料），"
                 "「營業額」是直接量到的真實金額，兩者都是日均值。這是本機同步時算好的快照，不是即時重算。"
             )
+
+    st.subheader(f"{store_id} 店　星期幾 x 時段：建議人力 vs 實際排班人力")
+    ratio_row = conn.execute(
+        "SELECT ratio FROM staffing_cup_invoice_ratio WHERE store_id = ?", (store_id,)
+    ).fetchone()
+    if not ratio_row or not weekday_rows:
+        st.info(f"{store_id} 店目前雲端沒有足夠的杯數/發票資料，無法估算星期幾建議人力。")
+    else:
+        ratio = ratio_row["ratio"]
+        delivery_by_hour = avg_delivery_by_hour(conn, store_id)
+        invoice_by_hour = {}
+        for r in weekday_rows:
+            invoice_by_hour.setdefault(r["hour_slot"], {})[r["weekday"]] = r["invoice_count"]
+        roster_actual_by_hour = {}
+        for r in roster_rows:
+            actual = None
+            if r["full_time_count"] is not None and r["part_time_count"] is not None:
+                actual = r["full_time_count"] + r["part_time_count"]
+            roster_actual_by_hour.setdefault(r["hour_slot"], {})[r["weekday"]] = actual
+
+        def _weekday_hour_rows(weekday: str) -> list:
+            rows = []
+            for hour_slot in HOUR_SLOTS:
+                invoice_count = invoice_by_hour.get(hour_slot, {}).get(weekday)
+                if invoice_count is None:
+                    continue
+                est_cups = round(invoice_count * ratio, 1)
+                delivery_hours = calculate_delivery_hours(delivery_by_hour.get(hour_slot, 0.0), working_config)
+                is_tea = is_tea_brewing_hour(hour_slot, working_config)
+                calc = required_front_staff_for_hour(est_cups, delivery_hours, is_tea, working_config)
+                rows.append({
+                    "hour_slot": hour_slot,
+                    "estimated_cups": est_cups,
+                    "recommended": calc["required"],
+                    "formula": calc["formula"],
+                    "actual": roster_actual_by_hour.get(hour_slot, {}).get(weekday),
+                })
+            return rows
+
+        est_weekday_choice = st.selectbox(
+            "星期幾", WEEKDAY_NAMES, format_func=lambda w: f"星期{w}", key="cloud_staffing_weekday"
+        )
+        weekday_rows_calc = _weekday_hour_rows(est_weekday_choice)
+        if not weekday_rows_calc:
+            st.info(f"{store_id} 店星期{est_weekday_choice}目前沒有足夠樣本。")
+        else:
+            detail_df = pd.DataFrame(
+                [
+                    {
+                        "時段": f"{r['hour_slot']}:00",
+                        "估計杯數": r["estimated_cups"],
+                        "公式（取整前）": r["formula"],
+                        "建議人力": r["recommended"],
+                        "實際人力": r["actual"],
+                    }
+                    for r in weekday_rows_calc
+                ]
+            )
+            st.dataframe(detail_df, hide_index=True, use_container_width=True)
+            bar_df = pd.DataFrame(
+                [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in weekday_rows_calc]
+                + [{"時段": r["hour_slot"], "類別": "實際人力", "人力": r["actual"]} for r in weekday_rows_calc]
+            )
+            line_df = pd.DataFrame([{"時段": r["hour_slot"], "估計杯數": r["estimated_cups"]} for r in weekday_rows_calc])
+            weekday_staffing_chart = build_bar_line_combo_chart(
+                bar_df, "時段", "人力", "人力（人）",
+                line_df, "估計杯數", "估計杯數（杯，推算值）",
+                bar_category_field="類別",
+                bar_domain=["建議人力", "實際人力"],
+                bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(weekday_staffing_chart, use_container_width=True)
+            st.caption(
+                "估計杯數＝發票張數 × 「每張發票約幾杯」轉換比例，是推算值，不是實際量到的杯數；"
+                "外送耗時修正用跨月日均值套用到七天，也是近似值。「實際人力」沒有排班原始資料的"
+                "時段留空，不是 0 人。"
+            )
+
+        st.markdown("**平日／假日彙整**")
+        daytype_weekdays = {**{wd: "平日" for wd in WEEKDAY_NAMES[:5]}, **{wd: "假日" for wd in WEEKDAY_NAMES[5:]}}
+        for daytype in ("平日", "假日"):
+            wds_in_group = [wd for wd, dt in daytype_weekdays.items() if dt == daytype]
+            per_hour = {}
+            for wd in wds_in_group:
+                for r in _weekday_hour_rows(wd):
+                    cell = per_hour.setdefault(r["hour_slot"], {"cups": [], "recommended": [], "actual": []})
+                    cell["cups"].append(r["estimated_cups"])
+                    cell["recommended"].append(r["recommended"])
+                    if r["actual"] is not None:
+                        cell["actual"].append(r["actual"])
+            if not per_hour:
+                st.info(f"{store_id} 店目前沒有{daytype}的估計資料可以彙整。")
+                continue
+            daytype_merged = [
+                {
+                    "時段": hour_slot,
+                    "建議人力": round(sum(v["recommended"]) / len(v["recommended"]), 1),
+                    "實際人力": round(sum(v["actual"]) / len(v["actual"]), 2) if v["actual"] else None,
+                    "估計杯數": round(sum(v["cups"]) / len(v["cups"]), 1),
+                }
+                for hour_slot, v in sorted(per_hour.items())
+            ]
+            st.caption(f"{daytype}（{'、'.join(f'星期{wd}' for wd in wds_in_group)} 平均）")
+            daytype_bar_df = pd.DataFrame(
+                [{"時段": r["時段"], "類別": "建議人力", "人力": r["建議人力"]} for r in daytype_merged]
+                + [{"時段": r["時段"], "類別": "實際人力", "人力": r["實際人力"]} for r in daytype_merged]
+            )
+            daytype_line_df = pd.DataFrame([{"時段": r["時段"], "估計杯數": r["估計杯數"]} for r in daytype_merged])
+            daytype_weekday_chart = build_bar_line_combo_chart(
+                daytype_bar_df, "時段", "人力", "人力（人）",
+                daytype_line_df, "估計杯數", "估計杯數（杯，推算值）",
+                bar_category_field="類別",
+                bar_domain=["建議人力", "實際人力"],
+                bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(daytype_weekday_chart, use_container_width=True)
+
+    st.subheader(f"{store_id} 店　星期幾彙整（相對星期五的差異）")
+    summary_rows = conn.execute(
+        "SELECT weekday, days, revenue_median_vs_friday, revenue_min_vs_friday, revenue_min_date, "
+        "revenue_max_vs_friday, revenue_max_date, invoice_median_vs_friday, invoice_min_vs_friday, "
+        "invoice_min_date, invoice_max_vs_friday, invoice_max_date "
+        "FROM staffing_weekday_summary_public WHERE store_id = ?",
+        (store_id,),
+    ).fetchall()
+    if not summary_rows:
+        st.info(f"{store_id} 店目前雲端還沒有星期幾彙整快照，請先在本機執行同步腳本。")
+    else:
+        order = {wd: i for i, wd in enumerate(WEEKDAY_NAMES)}
+        summary_rows = sorted(summary_rows, key=lambda r: order.get(r["weekday"], 99))
+
+        def _fmt_pct(v):
+            if v is None:
+                return None
+            return f"{'+' if v > 0 else ''}{v}%"
+
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "星期": f"星期{r['weekday']}",
+                    "天數": r["days"],
+                    "營業額中位數(vs星期五)": _fmt_pct(r["revenue_median_vs_friday"]),
+                    "營業額最小(vs星期五)": _fmt_pct(r["revenue_min_vs_friday"]),
+                    "營業額最小發生日": r["revenue_min_date"],
+                    "營業額最大(vs星期五)": _fmt_pct(r["revenue_max_vs_friday"]),
+                    "營業額最大發生日": r["revenue_max_date"],
+                    "發票張數中位數(vs星期五)": _fmt_pct(r["invoice_median_vs_friday"]),
+                }
+                for r in summary_rows
+            ]
+        )
+        st.dataframe(summary_df, hide_index=True, use_container_width=True)
+        st.caption(
+            "所有數字都是「跟星期五中位數比差多少 %」，不是真實金額——星期五本身固定顯示 0%，"
+            "當基準。正數代表比星期五多、負數代表比星期五少。最大/最小發生日期是真實日期，"
+            "方便回頭查當天是否有連假、天氣、設備故障等特殊事件，但看不出當天實際金額。"
+        )
 
 
 def _cloud_secrets_available() -> bool:

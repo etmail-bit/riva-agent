@@ -49,11 +49,13 @@ import subprocess
 from datetime import date
 from pathlib import Path
 
-from scripts.analyze_operations import hourly_channel_by_weekday
+from scripts.analyze_operations import hourly_channel_by_weekday, public_weekday_summary
 from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, roster_mode_by_weekday
 from scripts.calculate_staffing import load_config as load_staffing_config
 from scripts.compare_staffing import compare as compare_staffing
 from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
+from scripts.compare_staffing import compare_daytype as compare_staffing_daytype
+from scripts.estimate_staffing_by_weekday import cups_per_invoice_ratio
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "riva_agent.db"
@@ -305,8 +307,9 @@ def migrate_staffing_comparison(local, cloud, staffing_config):
     for p in periods:
         rows = compare_staffing(local, staffing_config, p["store_id"], p["year_month"])
         for row in rows:
-            if row["actual"] is None:
-                continue
+            # 2026-07-14 修正：之前 actual 是 None 就整格跳過不同步，等於雲端那個時段的
+            # 「建議人力」也一起消失了；本機版已經改成 actual 缺資料只留空、recommended
+            # 照樣顯示，這裡跟著改，不再跳過整列。
             cloud.execute(
                 """
                 INSERT INTO staffing_hourly_comparison (store_id, year_month, hour_slot, recommended, actual, diff)
@@ -347,8 +350,7 @@ def migrate_staffing_comparison_yearly(local, cloud, staffing_config):
         rows = compare_staffing_aggregate(local, staffing_config, store_id, agg_months)
         months_included = ",".join(agg_months)
         for row in rows:
-            if row["actual"] is None:
-                continue
+            # 2026-07-14：同 migrate_staffing_comparison() 的修正，actual 缺資料不再整列跳過。
             cloud.execute(
                 """
                 INSERT INTO staffing_hourly_comparison_yearly
@@ -365,6 +367,38 @@ def migrate_staffing_comparison_yearly(local, cloud, staffing_config):
                 (store_id, current_year, row["hour_slot"], row["recommended"], row["actual"], row["diff"], row["cups"], months_included),
             )
             n += 1
+    return n
+
+
+def migrate_staffing_comparison_daytype(local, cloud, staffing_config):
+    """平日/假日拆分版（2026-07-14 新增）：本機把 compare_staffing.compare_daytype()
+    算完，只把彙總後的 {daytype, hour_slot, cups, recommended, formula, actual, diff}
+    同步上雲，跟 migrate_staffing_comparison() 同一套零洩漏設計——杯量來源是真實
+    星期六/日單日樣本反推，實際人力依真實 business_date 分組後才彙總，raw_staffing_actual
+    本身不會被同步。"""
+    store_ids = [r["store_id"] for r in local.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    n = 0
+    for store_id in store_ids:
+        result = compare_staffing_daytype(local, staffing_config, store_id)
+        for daytype in ("平日", "假日"):
+            for row in result[daytype]:
+                cloud.execute(
+                    """
+                    INSERT INTO staffing_hourly_comparison_daytype
+                        (store_id, daytype, hour_slot, cups, recommended, formula, actual, diff)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(store_id, daytype, hour_slot) DO UPDATE SET
+                        cups = excluded.cups,
+                        recommended = excluded.recommended,
+                        formula = excluded.formula,
+                        actual = excluded.actual,
+                        diff = excluded.diff,
+                        generated_at = datetime('now')
+                    """,
+                    (store_id, daytype, row["hour_slot"], row["cups"], row["recommended"],
+                     row["formula"], row["actual"], row["diff"]),
+                )
+                n += 1
     return n
 
 
@@ -397,6 +431,71 @@ def migrate_channel_by_weekday(local, cloud):
                     (store_id, wd, hour_slot, invoice_count, row.get(f"星期{wd}_營業額"), row.get(f"星期{wd}_樣本天數")),
                 )
                 n += 1
+    return n
+
+
+def migrate_cup_invoice_ratio(local, cloud):
+    """星期幾建議人力估計（scripts/estimate_staffing_by_weekday.py）需要的「每張發票
+    約幾杯」轉換比例，只同步這一個數字（有真實杯數月份反推出來的平均值），不含任何
+    逐筆發票/杯數明細——雲端頁面拿這個數字乘上已經同步的 staffing_channel_by_weekday
+    發票張數，就能算出跟本機一樣的估計杯數/建議人力，不需要 raw_invoice_transactions。"""
+    store_ids = [r["store_id"] for r in local.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    n = 0
+    for store_id in store_ids:
+        info = cups_per_invoice_ratio(local, store_id)
+        if info["avg"] is None:
+            continue
+        cloud.execute(
+            """
+            INSERT INTO staffing_cup_invoice_ratio (store_id, ratio) VALUES (?, ?)
+            ON CONFLICT(store_id) DO UPDATE SET ratio = excluded.ratio, generated_at = datetime('now')
+            """,
+            (store_id, info["avg"]),
+        )
+        n += 1
+    return n
+
+
+def migrate_weekday_summary_public(local, cloud):
+    """星期幾彙整安全版（2026-07-14 新增）：本機把
+    analyze_operations.public_weekday_summary() 算完（真實金額已經轉成相對星期五的
+    百分比差異），只同步轉換後的結果，真實金額版（weekday_daily_summary()）不會被
+    這支函式碰到。"""
+    store_ids = [r["store_id"] for r in local.execute("SELECT store_id FROM stores ORDER BY store_id").fetchall()]
+    n = 0
+    for store_id in store_ids:
+        rows = public_weekday_summary(local, store_id)
+        for r in rows:
+            cloud.execute(
+                """
+                INSERT INTO staffing_weekday_summary_public
+                    (store_id, weekday, days, revenue_median_vs_friday, revenue_min_vs_friday,
+                     revenue_min_date, revenue_max_vs_friday, revenue_max_date,
+                     invoice_median_vs_friday, invoice_min_vs_friday, invoice_min_date,
+                     invoice_max_vs_friday, invoice_max_date)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(store_id, weekday) DO UPDATE SET
+                    days = excluded.days,
+                    revenue_median_vs_friday = excluded.revenue_median_vs_friday,
+                    revenue_min_vs_friday = excluded.revenue_min_vs_friday,
+                    revenue_min_date = excluded.revenue_min_date,
+                    revenue_max_vs_friday = excluded.revenue_max_vs_friday,
+                    revenue_max_date = excluded.revenue_max_date,
+                    invoice_median_vs_friday = excluded.invoice_median_vs_friday,
+                    invoice_min_vs_friday = excluded.invoice_min_vs_friday,
+                    invoice_min_date = excluded.invoice_min_date,
+                    invoice_max_vs_friday = excluded.invoice_max_vs_friday,
+                    invoice_max_date = excluded.invoice_max_date,
+                    generated_at = datetime('now')
+                """,
+                (
+                    store_id, r["星期"], r["天數"], r["營業額中位數_vs星期五"], r["營業額最小_vs星期五"],
+                    r["營業額最小日期"], r["營業額最大_vs星期五"], r["營業額最大日期"],
+                    r["發票中位數_vs星期五"], r["發票最小_vs星期五"], r["發票最小日期"],
+                    r["發票最大_vs星期五"], r["發票最大日期"],
+                ),
+            )
+            n += 1
     return n
 
 
@@ -465,8 +564,14 @@ def main():
     print(f"staffing_roster_mode（彙總快照）: {n8} 筆已寫入快照")
     n9 = migrate_staffing_comparison_yearly(local, cloud, staffing_config)
     print(f"staffing_hourly_comparison_yearly（全年彙總快照）: {n9} 筆已寫入快照")
+    n9b = migrate_staffing_comparison_daytype(local, cloud, staffing_config)
+    print(f"staffing_hourly_comparison_daytype（平日/假日拆分快照，2026-07-14 新增）: {n9b} 筆已寫入快照")
     n10 = migrate_channel_by_weekday(local, cloud)
     print(f"staffing_channel_by_weekday（星期幾發票張數/營業額快照）: {n10} 筆已寫入快照")
+    n11 = migrate_cup_invoice_ratio(local, cloud)
+    print(f"staffing_cup_invoice_ratio（每張發票約幾杯轉換比例，2026-07-14 新增）: {n11} 筆已寫入快照")
+    n12 = migrate_weekday_summary_public(local, cloud)
+    print(f"staffing_weekday_summary_public（星期幾彙整安全版，2026-07-14 新增）: {n12} 筆已寫入快照")
 
     cloud.commit()
     cloud.close()

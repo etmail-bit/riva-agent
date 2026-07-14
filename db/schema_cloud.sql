@@ -142,6 +142,53 @@ CREATE TABLE IF NOT EXISTS staffing_hourly_comparison (
     UNIQUE(store_id, year_month, hour_slot)
 );
 
+-- 「實際排班 vs 建議人力」平日/假日拆分快照（2026-07-14 新增），只在本機用
+-- scripts/compare_staffing.py 的 compare_daytype() 算完才同步上來——杯量用真實
+-- 星期六/日單日樣本反推，實際人力依真實 business_date 分平日(一~五)/假日(六日)，
+-- 這裡只存彙總後的數字，不含任何逐日/逐員工細節。
+CREATE TABLE IF NOT EXISTS staffing_hourly_comparison_daytype (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    daytype TEXT NOT NULL,
+    hour_slot TEXT NOT NULL,
+    cups REAL,
+    recommended INTEGER,
+    formula TEXT,
+    actual REAL,
+    diff REAL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, daytype, hour_slot)
+);
+
+-- 「每張發票約幾杯」轉換比例（2026-07-14 新增），供
+-- scripts/estimate_staffing_by_weekday.py 的星期幾建議人力估計在雲端使用。
+-- 只有這一個數字，不含任何逐筆發票/杯數明細。
+CREATE TABLE IF NOT EXISTS staffing_cup_invoice_ratio (
+    store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
+    ratio REAL NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 星期幾彙整安全版（2026-07-14 新增）：analyze_operations.public_weekday_summary()
+-- 的結果，真實營業額/發票張數改成「相對星期五中位數的百分比差異」，不含任何真實金額，
+-- 只有最大/最小值發生的日期（不是金額）保留。
+CREATE TABLE IF NOT EXISTS staffing_weekday_summary_public (
+    store_id TEXT NOT NULL REFERENCES stores(store_id),
+    weekday TEXT NOT NULL,
+    days INTEGER,
+    revenue_median_vs_friday REAL,
+    revenue_min_vs_friday REAL,
+    revenue_min_date TEXT,
+    revenue_max_vs_friday REAL,
+    revenue_max_date TEXT,
+    invoice_median_vs_friday REAL,
+    invoice_min_vs_friday REAL,
+    invoice_min_date TEXT,
+    invoice_max_vs_friday REAL,
+    invoice_max_date TEXT,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(store_id, weekday)
+);
+
 -- 「實際排班 vs 建議人力」跨月彙總（同一年、排除農曆年節月份、排除未過完的當月）快照，
 -- 只在本機用 scripts/compare_staffing.py 的 compare_aggregate() 算完才同步上來。
 -- year 是這批彙總涵蓋的年份（例如 "2026"），months_included 記錄實際納入哪些月份
