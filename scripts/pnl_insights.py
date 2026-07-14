@@ -205,20 +205,21 @@ def generate_pnl_insights(conn) -> str:
         if s["manual_months"] > 0:
             line += f"（其中 {s['manual_months']} 個月營收是手動輸入、非 POS 稽核過，數字僅供參考）"
 
-        if _table_exists(conn, "store_operational_insights"):
-            # 2026-07-14：雲端安全版的 store_operational_insights 沒有 summary_text
-            # 欄位（那欄含真實客單價金額，只留本機），只有 public_summary_text——
-            # 這裡接住 sqlite3.OperationalError，雲端就直接跳過這句，不會整頁掛掉，
-            # 安全版的通路/回頭客/客單價指數改由 app_pnl.render_operational_insights()
-            # 另外一個獨立區塊顯示，不在這句話裡重複塞一次。
-            try:
+        # 2026-07-14：雲端安全版的 store_operational_insights 沒有 summary_text 欄位
+        # （那欄含真實客單價金額，只留本機），只有 public_summary_text。整段包進
+        # try/except，不只包 SELECT——_table_exists() 本身也是查同一個 conn，任何
+        # 跟這張表有關的環節出錯都不該讓整頁掛掉，雲端就直接跳過這句，安全版的
+        # 通路/回頭客/客單價指數改由 app_pnl.render_operational_insights() 另一個
+        # 獨立區塊顯示，不在這句話裡重複塞一次。
+        try:
+            if _table_exists(conn, "store_operational_insights"):
                 op_row = conn.execute(
                     "SELECT summary_text FROM store_operational_insights WHERE store_id = ?", (sid,)
                 ).fetchone()
-            except sqlite3.OperationalError:
-                op_row = None
-            if op_row is not None:
-                line += f" {dict(op_row)['summary_text']}"
+                if op_row is not None:
+                    line += f" {dict(op_row)['summary_text']}"
+        except sqlite3.OperationalError:
+            pass
 
         lines.append(line)
 
