@@ -805,6 +805,7 @@ def render_staffing_summary_page() -> None:
         horizontal=True, key="staffing_compare_mode",
     )
 
+    months_note = ""
     if compare_mode == "平日/假日拆分（真實資料）":
         daytype_rows = conn.execute(
             "SELECT daytype, hour_slot, cups, recommended, formula, actual, diff "
@@ -851,7 +852,6 @@ def render_staffing_summary_page() -> None:
                     line_color=CHART_COLOR_COMBINED_NET_PROFIT,
                 )
                 st.altair_chart(daytype_chart, use_container_width=True)
-        months_note = ""
     elif compare_mode == "單月":
         comparison_rows = conn.execute(
             "SELECT hour_slot, recommended, actual, diff FROM staffing_hourly_comparison "
