@@ -25,7 +25,12 @@ config/**/*.yaml
 !config/*.example.yaml
 db/**/*.db
 db/**/*.sqlite3
-reports/
+reports/*
+# 00_報表總覽.md 是靜態導覽檔，不含真實數字，2026-07-14 使用者確認可以公開，
+# 其他帶日期後綴的報告（含真實營收/成本/薪資數字）繼續排除。用 reports/* 而不是
+# reports/ 排除整個目錄，是因為 git 有個規則：父目錄本身被排除的話，底下的檔案
+# 沒辦法再用 !pattern 個別解除排除，只有排除「目錄底下的內容」才能這樣做。
+!reports/00_報表總覽.md
 *.log
 __pycache__/
 *.pyc
