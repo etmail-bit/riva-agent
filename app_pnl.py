@@ -214,9 +214,45 @@ def render_manual_revenue_section(conn: sqlite3.Connection, store_id: str) -> No
             st.rerun()
 
 
+def render_operational_insights(conn: sqlite3.Connection) -> None:
+    """通路組合／客單價相對指數／回頭客（2026-07-14 新增，取代 2026-07-09「完全不公開」
+    的舊決定）。只讀 store_operational_insights.public_summary_text 這個安全版 JSON
+    （見 scripts/analyze_operations.public_operational_summary()）——通路組合/回頭客
+    是百分比，客單價是「相對指數」（平均值=100，不是真實金額），不含任何真實金額或
+    真實客數，真實客單價的完整版只留在本機 app.py。"""
+    rows = conn.execute(
+        "SELECT store_id, public_summary_text FROM store_operational_insights "
+        "WHERE public_summary_text IS NOT NULL ORDER BY store_id"
+    ).fetchall()
+    if not rows:
+        return
+
+    st.subheader("營運概況（通路組合／客單價相對指數／回頭客）")
+    st.caption("客單價用「相對指數」呈現（平均值＝100），不是真實金額；通路組合／回頭客都是百分比，不含真實客數。")
+    for r in rows:
+        data = json.loads(r["public_summary_text"])
+        st.markdown(f"**{r['store_id']} 店**")
+        cols = st.columns(3)
+        if data.get("delivery_pct") is not None:
+            cols[0].metric("外送平台佔營收", f"{data['delivery_pct']}%")
+        if data.get("repeat_customer_pct") is not None:
+            cols[1].metric("回頭客佔客數", f"{data['repeat_customer_pct']}%")
+        if data.get("repeat_revenue_pct") is not None:
+            cols[2].metric("回頭客佔營收", f"{data['repeat_revenue_pct']}%")
+        ticket = data.get("ticket_price_index")
+        if ticket:
+            st.caption(
+                f"客單價相對指數（平均＝100）：中位數 {ticket['median_index']}、"
+                f"25分位 {ticket['p25_index']}、75分位 {ticket['p75_index']}"
+            )
+        if data.get("peak_hours"):
+            st.caption(f"尖峰時段：{', '.join(f'{h}:00' for h in data['peak_hours'])}")
+
+
 def render_combined_pnl_page(conn: sqlite3.Connection, stores: list) -> None:
-    """兩店合計盈虧趨勢＋彙整建議。刻意不含本機版 app.py 才有的「營運報告」區塊——
-    那份分析吃 Layer 1 原始明細（發票/收銀機明細），依零洩漏原則只留在本機。"""
+    """兩店合計盈虧趨勢＋彙整建議＋營運概況（2026-07-14 起營運概況的安全版摘要也會
+    顯示，見 render_operational_insights()；本機版 app.py 才有的逐筆通路明細/客單價
+    分布圖表這種更細的版本，依零洩漏原則只留在本機）。"""
     st.subheader("兩店合計盈虧趨勢")
     rows = conn.execute(
         "SELECT year_month, store_id, net_profit FROM monthly_pnl ORDER BY year_month"
@@ -259,6 +295,8 @@ def render_combined_pnl_page(conn: sqlite3.Connection, stores: list) -> None:
     sum_cols = [f"{sid} 店稅後淨利" for sid in stores] + ["兩店合計淨利"]
     table_records = add_total_row(table_records, "月份", sum_cols)
     st.dataframe(pd.DataFrame(table_records), hide_index=True, use_container_width=True)
+
+    render_operational_insights(conn)
 
 
 def render_pnl_page() -> None:

@@ -204,8 +204,8 @@ def migrate_staffing_insights(local, cloud):
     確認的公開範圍：只放「預估可節省金額」）。summary_text 那個含真實人事成本／固定
     薪資的完整版**刻意不查、不送**，本機以外的地方看不到那些數字。
 
-    store_operational_insights（通路組合／客單價，含真實客單價金額與營收佔比）
-    2026-07-09 使用者決定不公開，這支腳本完全不處理那張表，只留在本機給 app.py 用。
+    store_operational_insights（通路組合／客單價）2026-07-14 改為部分開放，
+    見下面 migrate_operational_insights()，跟這支函式是姊妹函式。
     """
     exists = local.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='store_staffing_insights'"
@@ -222,6 +222,34 @@ def migrate_staffing_insights(local, cloud):
             VALUES (?, ?, ?)
             ON CONFLICT(store_id) DO UPDATE SET
                 summary_text = excluded.summary_text,
+                generated_at = excluded.generated_at
+            """,
+            (r["store_id"], r["public_summary_text"], r["generated_at"]),
+        )
+    return len(rows)
+
+
+def migrate_operational_insights(local, cloud):
+    """只同步 store_operational_insights 的 public_summary_text 欄位（2026-07-14
+    使用者決定開放的範圍：通路組合/回頭客用百分比、客單價用相對指數，見
+    analyze_operations.public_operational_summary()）。summary_text 那個含真實客單價
+    金額的完整版**刻意不查、不送**，跟 migrate_staffing_insights() 同一套界線。"""
+    exists = local.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='store_operational_insights'"
+    ).fetchone()
+    if exists is None:
+        return 0
+    rows = local.execute(
+        "SELECT store_id, public_summary_text, generated_at FROM store_operational_insights "
+        "WHERE public_summary_text IS NOT NULL"
+    ).fetchall()
+    for r in rows:
+        cloud.execute(
+            """
+            INSERT INTO store_operational_insights (store_id, public_summary_text, generated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(store_id) DO UPDATE SET
+                public_summary_text = excluded.public_summary_text,
                 generated_at = excluded.generated_at
             """,
             (r["store_id"], r["public_summary_text"], r["generated_at"]),
@@ -425,6 +453,8 @@ def main():
     print(f"monthly_pnl: {n3} 筆已寫入快照")
     n4 = migrate_staffing_insights(local, cloud)
     print(f"store_staffing_insights（僅公開安全版摘要）: {n4} 筆已寫入快照")
+    n4b = migrate_operational_insights(local, cloud)
+    print(f"store_operational_insights（僅公開安全版摘要，2026-07-14 新增）: {n4b} 筆已寫入快照")
     n5 = migrate_hourly_pattern_monthly(local, cloud)
     print(f"raw_hourly_pattern_monthly: {n5} 筆已寫入快照")
     n6 = migrate_hourly_pattern_daily(local, cloud)

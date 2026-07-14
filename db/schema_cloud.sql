@@ -85,8 +85,15 @@ CREATE TABLE IF NOT EXISTS monthly_pnl (
     UNIQUE(store_id, year_month)
 );
 
--- store_operational_insights（通路組合／客單價，含真實客單價金額）2026-07-09 使用者
--- 決定不公開，刻意不放進雲端 schema。完整版只存在本機 db/riva_agent.db，供 app.py 用。
+-- store_operational_insights：2026-07-09 曾決定完全不公開，2026-07-14 改為只同步
+-- public_summary_text（analyze_operations.public_operational_summary() 的 JSON，
+-- 通路組合/回頭客用百分比、客單價用相對指數，不含真實金額/真實客數）。本機的
+-- summary_text（含真實客單價）不會同步，只存在本機 db/riva_agent.db。
+CREATE TABLE IF NOT EXISTS store_operational_insights (
+    store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
+    public_summary_text TEXT,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 --
 -- store_staffing_insights：欄位表面上看起來只是「一段結論文字」，但文字內容本身
 -- 可能藏著真實金額——2026-07-09 曾經誤把含真實人事成本的完整版同步上來過，發現後

@@ -227,12 +227,15 @@ CREATE TABLE monthly_pnl (
 -- 只存在本機、刻意不同步到雲端 Turso DB；這張表之後若要同步上雲端，只會送出聚合後的結論文字，
 -- 不會把逐筆發票/通路明細送上去。2026-07-09 使用者決定：先只在本機累積，何時同步上雲端另外處理，
 -- 所以目前刻意不加進 schema_cloud.sql。
--- 通路組合／客單價／尖峰時段的濃縮結論，含真實客單價（元）與營收佔比 %，
--- 屬於敏感財務數字，2026-07-09 使用者決定：只留在本機，不同步上雲端
--- （不像 store_staffing_insights 有另外拆一份「公開安全版」，這張表沒有）。
+-- 通路組合／客單價／尖峰時段的濃縮結論。summary_text 含真實客單價（元），只留本機。
+-- public_summary_text（2026-07-14 新增，取代 2026-07-09「不公開」的舊決定）是
+-- analyze_operations.public_operational_summary() 的 JSON：通路組合/回頭客用百分比，
+-- 客單價改成「相對指數」（平均值=100）不露真實金額，這欄會被 build_cloud_snapshot.py
+-- 同步上雲端，summary_text 不會。
 CREATE TABLE store_operational_insights (
     store_id TEXT PRIMARY KEY REFERENCES stores(store_id),
     summary_text TEXT NOT NULL,
+    public_summary_text TEXT,
     generated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

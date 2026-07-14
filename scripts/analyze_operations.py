@@ -18,6 +18,7 @@ CLI 除錯時印到終端機用。
     source .venv/bin/activate
     python3 -m scripts.analyze_operations
 """
+import json
 import sqlite3
 import statistics
 from collections import defaultdict
@@ -282,9 +283,53 @@ def build_operational_summary(data: dict) -> str:
     return "，".join(parts) + "。"
 
 
+def public_operational_summary(data: dict) -> dict | None:
+    """雲端安全版營運摘要（2026-07-14 新增，使用者這天決定開放，取代 2026-07-09
+    「不公開」的舊決定）：通路組合／回頭客用百分比，客單價改成「相對指數」
+    （以平均值＝100 為基準，中位數/25分位/75分位換算成平均值的百分比），
+    不會出現任何真實金額或真實客數，只看得出「分布形狀」（例如 p75_index
+    明顯偏高代表存在幾筆偏高的訂單，不是金額本身）。回傳 None 代表這個店
+    目前沒有發票/回頭客資料可以算。"""
+    mix, inv, peaks, repeat = data["mix"], data["inv"], data["peaks"], data.get("repeat")
+    if not mix and not inv:
+        return None
+
+    ticket_index = None
+    if inv and inv["avg"]:
+        avg = inv["avg"]
+        ticket_index = {
+            "avg_index": 100,
+            "median_index": round(inv["median"] / avg * 100),
+            "p25_index": round(inv["p25"] / avg * 100),
+            "p75_index": round(inv["p75"] / avg * 100),
+        }
+
+    visit_buckets_pct = None
+    if repeat and repeat["total_customers"]:
+        total = repeat["total_customers"]
+        visit_buckets_pct = {
+            label: round(count / total * 100, 1) for label, count in repeat["visit_buckets"].items()
+        }
+
+    return {
+        "delivery_pct": round(mix["delivery_pct"] * 100, 1) if mix else None,
+        "pickup_pct": round(mix["pickup_pct"] * 100, 1) if mix else None,
+        "other_pct": round(mix["other_pct"] * 100, 1) if mix else None,
+        "ticket_price_index": ticket_index,
+        "peak_hours": [p[0] for p in peaks] if peaks else None,
+        "repeat_customer_pct": round(repeat["repeat_pct"], 1) if repeat else None,
+        "repeat_revenue_pct": round(repeat["repeat_revenue_pct"], 1) if repeat else None,
+        "visit_buckets_pct": visit_buckets_pct,
+        "monthly_returning_trend": repeat["monthly_trend"] if repeat else None,
+    }
+
+
 def persist_operational_insights(conn, per_store: dict) -> None:
     """把濃縮結論寫進 store_operational_insights，只有這張表存在時才寫
-    （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。"""
+    （雲端 Turso DB 目前沒有這張表，本機以外的呼叫端會直接跳過，不會噴錯）。
+    `public_summary_text` 存的是 `public_operational_summary()` 的 JSON 字串，
+    2026-07-14 新增，`build_cloud_snapshot.py` 只會同步這個欄位上雲端，
+    `summary_text`（含真實客單價金額）繼續留在本機。"""
     exists = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='store_operational_insights'"
     ).fetchone()
@@ -292,12 +337,14 @@ def persist_operational_insights(conn, per_store: dict) -> None:
         return
     for sid, data in per_store.items():
         summary = build_operational_summary(data)
+        public_summary = public_operational_summary(data)
         conn.execute(
-            "INSERT INTO store_operational_insights (store_id, summary_text, generated_at) "
-            "VALUES (?, ?, datetime('now')) "
+            "INSERT INTO store_operational_insights (store_id, summary_text, public_summary_text, generated_at) "
+            "VALUES (?, ?, ?, datetime('now')) "
             "ON CONFLICT(store_id) DO UPDATE SET "
-            "summary_text = excluded.summary_text, generated_at = excluded.generated_at",
-            (sid, summary),
+            "summary_text = excluded.summary_text, public_summary_text = excluded.public_summary_text, "
+            "generated_at = excluded.generated_at",
+            (sid, summary, json.dumps(public_summary, ensure_ascii=False) if public_summary else None),
         )
     conn.commit()
 
