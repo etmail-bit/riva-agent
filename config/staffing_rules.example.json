@@ -17,9 +17,9 @@
 
   "tea_brewing": {
     "start_time": "07:30",
-    "estimated_duration_hours": 1.0,
+    "estimated_duration_hours": 8.5,
     "front_capacity_contribution_cups_per_hour": 8,
-    "note": "煮茶的人不是完全脫離前場，煮茶「同時」還能兼顧前場出杯，貢獻 front_capacity_contribution_cups_per_hour 杯/hr 的前場產能，這個人本身仍然是額外的 +1（有人要顧茶湯），只是這段時間不是 0 產出"
+    "note": "estimated_duration_hours 不是「煮茶花多久」，是「開早班整段班次」的時長（對齊 shifts 裡「開早」的起訖）。開早班這個人整段班次前場產能只算 front_capacity_contribution_cups_per_hour 杯/hr，不是完整的 capacity.cups_per_staff_per_hour，只有他被打折，同時段其他人一律全產能。這個人本身仍然是額外的 +1（有人要顧茶湯），calculate_staffing.required_front_staff_for_hour() 回傳的是含這個人的總人數，不用再另外加 1"
   },
 
   "shifts": [
@@ -45,10 +45,18 @@
   },
 
   "employee_roles": {
-    "_說明": "員工代碼 → 角色（manager／staff／part_time），範本假代碼。",
+    "_說明": "員工代碼 → 角色（manager／staff／part_time），範本假代碼，放的是「現在」的角色。",
     "X": "manager",
     "Y": "staff",
     "Z": "part_time"
+  },
+
+  "employee_role_overrides_by_month": {
+    "_說明": "範本假代碼。處理員工角色隨時間變動的情況（例如原本正職後來轉兼職）：key 是員工代碼，value 是 {年月: 角色} 的對照表。scripts/calculate_payroll.py 的 resolve_role() 會先查這裡，查無才 fallback 用上面 employee_roles 的「現在」角色。沒有角色隨時間變動的員工不用出現在這裡。",
+    "Z": {
+      "2026-01": "staff",
+      "2026-02": "staff"
+    }
   },
 
   "scenario": {

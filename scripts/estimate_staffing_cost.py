@@ -19,14 +19,19 @@
     source .venv/bin/activate
     python3 -m scripts.estimate_staffing_cost
 """
-import math
 import sqlite3
 from datetime import date
 from pathlib import Path
 
 from scripts.calculate_pnl import get_fixed_cost
 from scripts.calculate_pnl import load_config as load_cost_config
-from scripts.calculate_staffing import calculate_delivery_hours, get_hourly_data, is_tea_brewing_hour, load_config
+from scripts.calculate_staffing import (
+    calculate_delivery_hours,
+    get_hourly_data,
+    is_tea_brewing_hour,
+    load_config,
+    required_front_staff_for_hour,
+)
 from scripts.compare_staffing import calculate_actual_hourly_average
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -119,8 +124,6 @@ def _required_staff_per_hour(hourly_data: dict, config: dict, scenario: str) -> 
     """
     capacity_cfg = config["capacity"]
     base_floor = capacity_cfg.get("min_floor_staff", 1)
-    capacity = capacity_cfg["cups_per_staff_per_hour"]
-    tea_contribution = config["tea_brewing"].get("front_capacity_contribution_cups_per_hour", 0)
     scenario_cfg = config.get("scenario", {})
     peak_hours = set(scenario_cfg.get("peak_hours", []))
     peak_floor = scenario_cfg.get("peak_floor_staff", base_floor)
@@ -129,26 +132,26 @@ def _required_staff_per_hour(hourly_data: dict, config: dict, scenario: str) -> 
     for hour_slot, data in hourly_data.items():
         floor = peak_floor if (scenario == "conservative" and hour_slot in peak_hours) else base_floor
         cups = data["daily_avg_cups"] or 0
-        # 跟 calculate_staffing.calculate_hourly_staffing() 同一套邏輯：煮茶時段的人
-        # 同時兼顧前場，先扣掉他貢獻的杯量，剩下的才是需要另外配人顧的前場需求。
+        # 跟 calculate_staffing.required_front_staff_for_hour() 同一套邏輯（2026-07-14
+        # 修正）：開早班那個人整段班次前場產能只算8杯/hr，其他人一律25杯/hr，這個人
+        # 本身也算一個班，已經折進 demand_driven 的總人數裡，不用再另外加。
         is_tea = is_tea_brewing_hour(hour_slot, config)
-        front_cups = max(0, cups - tea_contribution) if is_tea else cups
         delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
-        demand_driven = math.ceil(front_cups / capacity + delivery_hours) if (front_cups or delivery_hours) else 0
+        demand_driven = required_front_staff_for_hour(cups, delivery_hours, is_tea, config)["required"]
         required[hour_slot] = max(floor, demand_driven)
     return required
 
 
 def justified_hours_per_day(conn, store_id, year_month, config, scenario: str):
-    """需求驅動的「合理人力」：逐時段合理人力（見 _required_staff_per_hour）加總，
-    另外加煮茶時段的後場人力（固定算 1 人）。"""
+    """需求驅動的「合理人力」：逐時段合理人力（見 _required_staff_per_hour）加總。
+    2026-07-14 修正：開早班那個人的人-小時已經折進每個開早時段的 required 裡
+    （每個時段 +1），不用再像舊版那樣額外加一段固定的「煮茶時數」，會重複計算。"""
     hourly_data = get_hourly_data(conn, store_id, year_month)
     if not hourly_data:
         return None
 
     required = _required_staff_per_hour(hourly_data, config, scenario)
-    prep_hours = config["tea_brewing"]["estimated_duration_hours"]
-    return sum(required.values()) + prep_hours
+    return sum(required.values())
 
 
 def _time_to_minutes(value):

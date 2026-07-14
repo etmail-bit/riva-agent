@@ -100,22 +100,53 @@ def calculate_delivery_hours(daily_avg_delivery_count, config):
     return daily_avg_delivery_count * minutes_per_order / 60
 
 
-def calculate_hourly_staffing(hourly_data, config):
+def required_front_staff_for_hour(cups, delivery_hours, is_tea, config):
+    """算這個時段總共要排幾個前場人力（回傳的是總人數，不是「另外還要配幾個」）。
+
+    2026-07-14 使用者澄清修正：「開早」班（見 tea_brewing 設定的時間窗）那個人整段
+    班次的前場產能都被壓在 front_capacity_contribution_cups_per_hour（預設8杯/hr），
+    不是完整的 capacity.cups_per_staff_per_hour（25杯/hr）——**但只有這一個人被打折，
+    這段時間如果還缺人，補進來的人一律用完整產能算**。這個人本身這整段時間都算一個
+    班（+1），不是「除了他還要配幾個」這種需要另外心算加總的數字；之前的版本沒加這個
+    +1，且舊版的煮茶窗口只設定 1 小時，這次一起修正為完整的開早班時長。
+
+    公式：
+        煮茶（開早班）時段：ceil(max(0, 杯量-8) / 25 + 外送耗時) + 1
+        一般時段：          ceil(杯量 / 25 + 外送耗時)
+
+    2026-07-14 使用者要求：不要只回傳取整後的整數，取整前的公式值也要能看到（例如
+    「ceil(2.01)」而不是直接看到 3，不然不知道差多少就會多/少一個人）——回傳
+    {"raw": 取整前的數字, "required": 取整後的建議人力, "formula": 帶入實際數字的算式文字}。
+    """
     capacity = config["capacity"]["cups_per_staff_per_hour"]
-    tea_contribution = config["tea_brewing"].get("front_capacity_contribution_cups_per_hour", 0)
+    if is_tea:
+        tea_contribution = config["tea_brewing"].get("front_capacity_contribution_cups_per_hour", 0)
+        remaining_cups = max(0, cups - tea_contribution)
+        raw = remaining_cups / capacity + delivery_hours
+        required = math.ceil(raw) + 1
+        formula = f"ceil({remaining_cups:g}/{capacity}+{delivery_hours:.2f})+1"
+    elif cups or delivery_hours:
+        raw = cups / capacity + delivery_hours
+        required = math.ceil(raw)
+        formula = f"ceil({cups:g}/{capacity}+{delivery_hours:.2f})"
+    else:
+        raw, required, formula = 0.0, 0, "0"
+    return {"raw": round(raw, 2), "required": required, "formula": formula}
+
+
+def calculate_hourly_staffing(hourly_data, config):
     result = {}
     for hour_slot, data in hourly_data.items():
         cups = data["daily_avg_cups"] or 0
         is_tea = is_tea_brewing_hour(hour_slot, config)
-        # 煮茶的人「同時」還能兼顧前場出杯，貢獻 tea_contribution 杯/hr，不是完全脫離前場
-        # 產能——煮茶時段要先扣掉這部分杯量，剩下的才是需要另外配人顧的前場需求。
-        front_cups = max(0, cups - tea_contribution) if is_tea else cups
         delivery_hours = calculate_delivery_hours(data["daily_avg_delivery_count"], config)
-        required = math.ceil(front_cups / capacity + delivery_hours) if (front_cups or delivery_hours) else 0
+        calc = required_front_staff_for_hour(cups, delivery_hours, is_tea, config)
         result[hour_slot] = {
             "cups": cups,
             "delivery_hours": round(delivery_hours, 2),
-            "required_front_staff": required,
+            "required_front_staff": calc["required"],
+            "required_front_staff_raw": calc["raw"],
+            "required_front_staff_formula": calc["formula"],
             "tea_brewing": is_tea,
             "delivery_count": round(data["daily_avg_delivery_count"], 2),
         }
@@ -124,16 +155,18 @@ def calculate_hourly_staffing(hourly_data, config):
 
 def print_report(store_id, year_month, staffing, config):
     print(f"\n=== {store_id} 店 {year_month} ===")
-    print(f"{'時段':<6}{'日均杯數':>8}{'建議前場人力':>12}{'煮茶':>6}{'日均外送單':>10}{'外送耗時(hr)':>12}")
+    print(f"{'時段':<6}{'日均杯數':>8}{'建議前場人力':>12}{'公式':>26}{'煮茶':>6}{'日均外送單':>10}{'外送耗時(hr)':>12}")
     for hour_slot in sorted(staffing.keys()):
         s = staffing[hour_slot]
         tea_flag = "煮茶" if s["tea_brewing"] else ""
         print(
-            f"{hour_slot:<6}{s['cups']:>8}{s['required_front_staff']:>12}{tea_flag:>6}"
+            f"{hour_slot:<6}{s['cups']:>8}{s['required_front_staff']:>12}{s['required_front_staff_formula']:>26}{tea_flag:>6}"
             f"{s['delivery_count']:>10}{s['delivery_hours']:>12}"
         )
-    print("（「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，這個人同時兼顧前場出杯，已折抵進上面的建議前場人力）")
-    print("（「建議前場人力」已經把外送耗時併進需求裡：ceil(杯數/產能 + 外送耗時小時數)）")
+    print("（「公式」欄是取整前的完整算式，例如 ceil(2.01) 才會知道差多少就多/少一個人，不是只看最後的整數）")
+    print("（「煮茶」欄有標記的時段＝開早班時間窗，這個人整段班次前場產能只算8杯/hr（其他人一律25杯/hr），"
+          "「建議前場人力」已經是總人數，含這個人在內，不用再另外+1）")
+    print("（「建議前場人力」已經把外送耗時併進需求裡：ceil(杯數/產能 + 外送耗時小時數)，煮茶時段另外+1固定人頭）")
 
     print(f"\n班別對照（單位產能 {config['capacity']['cups_per_staff_per_hour']} 杯/人/hr）：")
     for shift in config["shifts"]:

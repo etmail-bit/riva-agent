@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """整合月度總報告：把月盈虧、排班建議、實際 vs 建議人力比對、排班成本估算、
-營運報告（通路/客單價/尖峰/回頭客/星期幾彙整）、平日假日杯數與排班眾數，
+營運報告（通路/客單價/尖峰/回頭客/星期幾彙整）、平日假日杯數與排班眾數、
+薪資計算（2026-07-13 新增，正職/兼職公司總負擔成本，依真實排班表＋2026年官方勞健保/勞退級距費率計算），
 全部彙整進一份 md（2026-07-13 使用者要求：只想開一份檔案就看到全部，
 不想每次都要分開找兩份報表檔＋三個網頁）。
 
@@ -25,6 +26,8 @@ from scripts.analyze_operations import _compute_all as _compute_operations
 from scripts.analyze_operations import build_report as build_operations_report
 from scripts.analyze_operations import persist_operational_insights
 from scripts.analyze_staffing_daytype import cup_stats_by_daytype, roster_mode_by_weekday
+from scripts.calculate_payroll import build_payroll_section
+from scripts.calculate_payroll import load_insurance_config as load_insurance_rates_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data
 from scripts.calculate_staffing import get_periods as get_staffing_periods
 from scripts.calculate_staffing import load_config as load_staffing_config
@@ -279,6 +282,10 @@ def main():
     lines_str += "\n\n---\n\n"
 
     lines_str += build_daytype_section(conn, store_ids, staffing_config)
+    lines_str += "\n\n---\n\n"
+
+    insurance_config = load_insurance_rates_config()
+    lines_str += build_payroll_section(conn, store_ids, staffing_config, insurance_config)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     out_path = REPORTS_DIR / f"月度總報告_{date.today().isoformat()}.md"

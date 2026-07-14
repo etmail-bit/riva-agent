@@ -30,6 +30,7 @@ from scripts.calculate_staffing import load_config as load_staffing_config
 from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
 from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
+from scripts.estimate_staffing_by_weekday import estimate_staffing_by_weekday
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 
 ROOT = Path(__file__).resolve().parent
@@ -729,10 +730,10 @@ def render_staffing_page() -> None:
         )
     with col2:
         tea_start = st.text_input(
-            "煮茶開始時間（HH:MM）", value=saved_config["tea_brewing"]["start_time"]
+            "開早班開始時間（HH:MM）", value=saved_config["tea_brewing"]["start_time"]
         )
         tea_duration = st.number_input(
-            "煮茶時數",
+            "開早班時數（這段時間前場產能打8折算的班別長度，不是純煮茶花的時間）",
             min_value=0.5,
             step=0.5,
             value=float(saved_config["tea_brewing"]["estimated_duration_hours"]),
@@ -781,7 +782,8 @@ def render_staffing_page() -> None:
             "時段": f"{hour_slot}:00",
             "日均杯數": staffing[hour_slot]["cups"],
             "建議前場人力": staffing[hour_slot]["required_front_staff"],
-            "煮茶": "煮茶 +1" if staffing[hour_slot]["tea_brewing"] else "",
+            "公式（取整前）": staffing[hour_slot]["required_front_staff_formula"],
+            "開早班": "Y" if staffing[hour_slot]["tea_brewing"] else "",
             "日均外送單": staffing[hour_slot]["delivery_count"],
             "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
         }
@@ -789,8 +791,9 @@ def render_staffing_page() -> None:
     ]
     st.dataframe(pd.DataFrame(hourly_rows), hide_index=True, use_container_width=True)
     st.caption(
-        "「煮茶」欄有標記的時段，除了前場人力，後場還要另外 +1 人煮茶，此人力不計入前場產能。"
-        "「建議前場人力」已經把外送耗時併進需求：ceil(杯數/產能 + 外送耗時小時數)"
+        "「開早班」欄有標記的時段，那個人整段班次前場產能只算8杯/hr（其他人一律全產能），"
+        "「建議前場人力」已經是總人數（含這個人），不用再另外+1。"
+        "「建議前場人力」已經把外送耗時併進需求：開早班時段 ceil(max(0,杯數-8)/產能 + 外送耗時) + 1，其餘時段 ceil(杯數/產能 + 外送耗時)"
     )
 
     hourly_df = pd.DataFrame(hourly_rows)
@@ -849,9 +852,12 @@ def render_staffing_page() -> None:
         scope_caption = f"{store_id} 店 {current_year} 年彙總"
         months_note = f"（納入月份：{'、'.join(agg_months)}，已排除 {current_year}-02 過年月份與未過完的當月）"
 
-    if all(row["actual"] is None for row in comparison_rows):
-        st.info(f"{scope_caption} 還沒有實際排班資料可比對，請先用 scripts/import_staffing_actual.py 匯入。")
-        return
+    no_actual_data = all(row["actual"] is None for row in comparison_rows)
+    if no_actual_data:
+        st.info(
+            f"{scope_caption} 還沒有實際排班資料（需要 scripts/import_staffing_actual.py 匯入），"
+            "下面「實際平均人力」欄位／長條先留空，只看「建議人力」。"
+        )
 
     def status_label(diff):
         if diff is None:
@@ -878,15 +884,17 @@ def render_staffing_page() -> None:
 
     understaffed = sum(1 for r in comparison_rows if r["diff"] is not None and r["diff"] < 0)
     overstaffed = sum(1 for r in comparison_rows if r["diff"] is not None and r["diff"] > 0)
-    st.caption(f"有實際資料的時段中：{understaffed} 個時段人力不足、{overstaffed} 個時段超編{months_note}")
+    if not no_actual_data:
+        st.caption(f"有實際資料的時段中：{understaffed} 個時段人力不足、{overstaffed} 個時段超編{months_note}")
 
-    chart_rows = [r for r in comparison_rows if r["actual"] is not None]
+    # 「建議人力」每個時段都算得出來，不需要有實際資料才顯示；「實際平均人力」缺資料的
+    # 時段留 None，Altair 對 None 的數值長條會直接不畫（空白），不會擋住建議人力那根長條。
     bar_df = pd.DataFrame(
-        [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in chart_rows]
-        + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in chart_rows]
+        [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in comparison_rows]
+        + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in comparison_rows]
     )
     line_df = pd.DataFrame(
-        [{"時段": r["hour_slot"], "日均杯數": r["cups"]} for r in chart_rows]
+        [{"時段": r["hour_slot"], "日均杯數": r["cups"]} for r in comparison_rows]
     )
     compare_chart = build_bar_line_combo_chart(
         bar_df, "時段", "人力", "人力（人）",
@@ -964,6 +972,64 @@ def render_hourly_pattern_page() -> None:
             "比例偏低（例如 5/10 或更低）代表這個時段的實際排法變動很大，眾數只是「最常見」的"
             "配置，不是「幾乎每次都這樣」，看到比例偏低的格子時，這個數字的參考價值要打折扣。"
         )
+
+    st.subheader("星期幾 x 時段：建議人力 vs 實際排班人力")
+    weekday_staffing = estimate_staffing_by_weekday(conn, store_id, saved_config)
+    if not weekday_staffing["rows"]:
+        st.info(f"{store_id} 店目前沒有足夠的杯數/發票資料，無法估算星期幾建議人力。")
+    else:
+        staffing_weekday_choice = st.selectbox(
+            "星期幾", WEEKDAY_NAMES, format_func=lambda w: f"星期{w}", key="staffing_weekday"
+        )
+        roster_by_hour = {r["時段"]: r for r in roster_rows} if date_range_row[0] is not None else {}
+        merged_rows = []
+        for r in weekday_staffing["rows"]:
+            recommended = r.get(f"星期{staffing_weekday_choice}_建議人力")
+            if recommended is None:
+                continue
+            roster_cell = roster_by_hour.get(r["時段"])
+            actual = None
+            if roster_cell is not None:
+                ft = roster_cell.get(f"星期{staffing_weekday_choice}_正職")
+                pt = roster_cell.get(f"星期{staffing_weekday_choice}_兼職")
+                if ft is not None and pt is not None:
+                    actual = ft + pt
+            merged_rows.append({
+                "時段": r["時段"],
+                "建議人力": recommended,
+                "實際人力": actual,
+                "估計杯數": r.get(f"星期{staffing_weekday_choice}_估計杯數"),
+                "公式（取整前）": r.get(f"星期{staffing_weekday_choice}_公式"),
+            })
+        # 「實際人力」欄位是 None（不是 0）的時段，Altair 對 None 的數值長條不會畫，
+        # 呈現效果就是那根長條留空，不會被誤讀成「實際排 0 人」。
+        bar_df = pd.DataFrame(
+            [{"時段": r["時段"], "類別": "建議人力", "人力": r["建議人力"]} for r in merged_rows]
+            + [{"時段": r["時段"], "類別": "實際人力", "人力": r["實際人力"]} for r in merged_rows]
+        )
+        line_df = pd.DataFrame([{"時段": r["時段"], "估計杯數": r["估計杯數"]} for r in merged_rows])
+        weekday_staffing_chart = build_bar_line_combo_chart(
+            bar_df, "時段", "人力", "人力（人）",
+            line_df, "估計杯數", "估計杯數（杯，推算值）",
+            bar_category_field="類別",
+            bar_domain=["建議人力", "實際人力"],
+            bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+            line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+        )
+        st.altair_chart(weekday_staffing_chart, use_container_width=True)
+        st.caption(
+            f"「建議人力」＝星期{staffing_weekday_choice}逐時段估計杯數套用建議人力公式算出來的結果。"
+            "估計杯數＝發票張數 × 「每張發票約幾杯」轉換比例（比例本身來自有真實杯數月份反推的真實"
+            "數字），是推算值，不是實際量到的杯數；外送耗時修正用跨月日均值套用到七天（沒有星期幾"
+            "拆分的外送單資料），也是近似值。開早班時段（07:00~16:00）的建議人力已經含那個只能"
+            "貢獻前場8杯/hr的人在內（其餘人一律全產能），不用再另外+1。「實際人力」沒有排班原始"
+            "資料的時段留空，不是 0 人。"
+        )
+        with st.expander(f"看星期{staffing_weekday_choice}每個時段的取整前公式（例如 ceil(2.01) 才知道差多少就多/少一人）"):
+            st.dataframe(
+                pd.DataFrame(merged_rows)[["時段", "估計杯數", "公式（取整前）", "建議人力", "實際人力"]],
+                hide_index=True, use_container_width=True,
+            )
 
     st.subheader("星期幾 x 時段：發票張數與營業額")
     weekday_rows = hourly_channel_by_weekday(conn, store_id)
