@@ -607,7 +607,10 @@ def render_pnl_page() -> None:
     col3.metric("稅後淨利", f"{result['net_profit']:,}")
 
     saved_pnl = conn.execute(
-        "SELECT net_profit, calculated_at FROM monthly_pnl WHERE store_id = ? AND year_month = ?",
+        "SELECT revenue, cogs, material_waste, platform_commission, payment_processing_fee, "
+        "labor_cost, labor_cost_source, rent, utilities, franchise_amortization, business_tax, "
+        "pretax_profit, income_tax_estimate, net_profit, calculated_at "
+        "FROM monthly_pnl WHERE store_id = ? AND year_month = ?",
         (store_id, year_month),
     ).fetchone()
     if saved_pnl is None:
@@ -626,25 +629,39 @@ def render_pnl_page() -> None:
         st.success(f"已將 {store_id} 店 {year_month} 的盈虧結果寫入 monthly_pnl")
         st.rerun()
 
-    breakdown_df = pd.DataFrame(
-        [
-            ("營收", result["revenue"]),
-            ("原物料（含包材）", -result["cogs"]),
-            ("原物料損耗", -result["material_waste"]),
-            ("平台抽成", -result["platform_commission"]),
-            ("金流手續費", -result["payment_processing_fee"]),
-            ("人事（含勞健保）", -result["labor_cost"]),
-            ("房租", -result["rent"]),
-            ("水電", -result["utilities"]),
-            ("加盟金攤提", -result["franchise_amortization"]),
-            ("營業稅", -result["business_tax"]),
-            ("稅前淨利", result["pretax_profit"]),
-            ("預估所得稅", -result["income_tax_estimate"]),
-            ("稅後淨利", result["net_profit"]),
-        ],
-        columns=["項目", "金額"],
-    )
-    st.dataframe(breakdown_df, hide_index=True, use_container_width=True)
+    def _breakdown_rows(d):
+        return [
+            ("營收", d["revenue"]),
+            ("原物料（含包材）", -d["cogs"]),
+            ("原物料損耗", -d["material_waste"]),
+            ("平台抽成", -d["platform_commission"]),
+            ("金流手續費", -d["payment_processing_fee"]),
+            ("人事（含勞健保）", -d["labor_cost"]),
+            ("房租", -d["rent"]),
+            ("水電", -d["utilities"]),
+            ("加盟金攤提", -d["franchise_amortization"]),
+            ("營業稅", -d["business_tax"]),
+            ("稅前淨利", d["pretax_profit"]),
+            ("預估所得稅", -d["income_tax_estimate"]),
+            ("稅後淨利", d["net_profit"]),
+        ]
+
+    # 2026-07-14 修正：這張明細表之前永遠顯示「即時試算」結果，雲端試算不到真實薪資
+    # （raw_staffing_actual 不同步上雲），導致就算 monthly_pnl 已經存了真實金額，
+    # 使用者在這張表上永遠只看得到概算值，誤以為「沒有更新」。改成：有已儲存紀錄
+    # 就優先顯示那份的明細（含真實金額來源標記），即時試算結果只有在跟已儲存紀錄
+    # 不同時才另外用展開區塊顯示，避免兩張長得很像的表同時攤開造成混淆。
+    if saved_pnl is not None:
+        if saved_pnl["labor_cost_source"] == "real_payroll":
+            st.caption("✅ 下面明細的人事成本是真實薪資計算結果（已儲存版本）。")
+        elif saved_pnl["labor_cost_source"] == "manual_actual":
+            st.caption("📝 下面明細的人事成本是手動輸入底薪 × 概算保費（已儲存版本）。")
+        st.dataframe(pd.DataFrame(_breakdown_rows(saved_pnl), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+        if saved_pnl["net_profit"] != result["net_profit"]:
+            with st.expander("目前試算結果明細（參數或資料來源跟已儲存版本不同才會出現差異）"):
+                st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+    else:
+        st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
 
     st.subheader(f"{store_id} 店歷史走勢")
     history = conn.execute(
