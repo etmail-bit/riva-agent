@@ -551,6 +551,10 @@ def render_pnl_page() -> None:
     st.subheader(f"{store_id} 店　{year_month}")
     if result["revenue_source"] == "manual":
         st.caption("📝 本月營收數字來自手動輸入（沒有 POS 稽核過的資料），僅供參考。")
+    if result["labor_cost_source"] == "manual_actual":
+        st.caption("📝 人事成本＝手動輸入的底薪 × 概算保費負擔率。")
+    elif result["labor_cost_source"] == "estimate":
+        st.caption("📐 人事成本目前是概算值，僅供參考。")
     col1, col2, col3 = st.columns(3)
     col1.metric("營收", f"{result['revenue']:,}")
     col2.metric("稅前淨利", f"{result['pretax_profit']:,}")

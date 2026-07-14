@@ -30,6 +30,7 @@ from scripts.calculate_staffing import load_config as load_staffing_config
 from scripts.chart_helpers import build_bar_line_combo_chart, build_trend_chart
 from scripts.compare_staffing import compare as compare_actual_vs_recommended
 from scripts.compare_staffing import compare_aggregate as compare_staffing_aggregate
+from scripts.compare_staffing import compare_daytype as compare_staffing_daytype
 from scripts.estimate_staffing_by_weekday import estimate_staffing_by_weekday
 from scripts.pnl_insights import add_total_row, generate_monthly_breakdown, generate_pnl_insights
 
@@ -608,6 +609,12 @@ def render_pnl_page() -> None:
     st.subheader(f"{store_id} 店　{year_month}")
     if result["revenue_source"] == "manual":
         st.caption("📝 本月營收數字來自手動輸入（沒有 POS 稽核過的資料），僅供參考。")
+    if result["labor_cost_source"] == "real_payroll":
+        st.caption("✅ 人事成本＝這個月真實排班表逐員工算出的公司總負擔成本（底薪/工資＋加班費＋雇主保費），不是概算值。")
+    elif result["labor_cost_source"] == "manual_actual":
+        st.caption("📝 人事成本＝手動輸入的底薪 × 概算保費負擔率（沒有逐員工真實排班資料可以精確算保費）。")
+    else:
+        st.caption("📐 人事成本目前是概算值（沒有真實排班資料也沒有手動輸入底薪），僅供參考。")
     col1, col2, col3 = st.columns(3)
     col1.metric("營收", f"{result['revenue']:,}")
     col2.metric("稅前淨利", f"{result['pretax_profit']:,}")
@@ -825,7 +832,55 @@ def render_staffing_page() -> None:
     st.caption(f"兼職班長度參考：{part_time_min}~{part_time_max} 小時")
 
     st.subheader("實際排班 vs 建議人力比對")
-    compare_mode = st.radio("比對範圍", ["單月", "全年彙總（排除2月）"], horizontal=True, key="compare_mode")
+    compare_mode = st.radio(
+        "比對範圍", ["單月", "全年彙總（排除2月）", "平日/假日拆分（真實資料）"],
+        horizontal=True, key="compare_mode",
+    )
+
+    if compare_mode == "平日/假日拆分（真實資料）":
+        daytype_result = compare_staffing_daytype(conn, working_config, store_id)
+        if not daytype_result["平日"] and not daytype_result["假日"]:
+            st.info(f"{store_id} 店目前沒有真實星期六/日單日樣本，無法拆分平日/假日。")
+            return
+        st.caption(
+            "杯量用真實星期六/日單日樣本反推（`raw_hourly_pattern_daily`），只涵蓋有這種樣本的"
+            "月份，範圍比「全年彙總」窄，但每個數字都是真實資料撐出來的，不是估計值。"
+            "外送耗時修正沒有平日/假日拆分的原始資料，用跨月日均值套用到兩組，是近似值。"
+        )
+        for daytype in ("平日", "假日"):
+            rows = daytype_result[daytype]
+            st.markdown(f"**{daytype}**")
+            if not rows:
+                st.info(f"{store_id} 店目前沒有{daytype}的真實樣本可以比對。")
+                continue
+            daytype_df = pd.DataFrame(
+                [
+                    {
+                        "時段": f"{r['hour_slot']}:00",
+                        "建議人力": r["recommended"],
+                        "公式（取整前）": r["formula"],
+                        "實際平均人力": r["actual"],
+                        "差異": r["diff"],
+                    }
+                    for r in rows
+                ]
+            )
+            st.dataframe(daytype_df, hide_index=True, use_container_width=True)
+            bar_df = pd.DataFrame(
+                [{"時段": r["hour_slot"], "類別": "建議人力", "人力": r["recommended"]} for r in rows]
+                + [{"時段": r["hour_slot"], "類別": "實際平均人力", "人力": r["actual"]} for r in rows]
+            )
+            line_df = pd.DataFrame([{"時段": r["hour_slot"], "日均杯數": r["cups"]} for r in rows])
+            daytype_chart = build_bar_line_combo_chart(
+                bar_df, "時段", "人力", "人力（人）",
+                line_df, "日均杯數", "日均杯數（杯）",
+                bar_category_field="類別",
+                bar_domain=["建議人力", "實際平均人力"],
+                bar_range=[CHART_COLOR_REVENUE, CHART_COLOR_NET_PROFIT],
+                line_color=CHART_COLOR_COMBINED_NET_PROFIT,
+            )
+            st.altair_chart(daytype_chart, use_container_width=True)
+        return
 
     if compare_mode == "單月":
         comparison_rows = compare_actual_vs_recommended(conn, working_config, store_id, year_month)
@@ -934,13 +989,26 @@ def render_hourly_pattern_page() -> None:
             "時段占比報表，見 scripts/import_hourly_pattern_daily.py），無法拆分平日/假日。"
         )
     else:
-        col_wd, col_we = st.columns(2)
-        with col_wd:
-            st.caption("平日（反推值，見下方說明）")
-            st.dataframe(pd.DataFrame(daytype_stats["平日"]), hide_index=True, use_container_width=True)
-        with col_we:
-            st.caption("假日（真實樣本平均，非估計值）")
-            st.dataframe(pd.DataFrame(daytype_stats["假日"]), hide_index=True, use_container_width=True)
+        # 2026-07-14 使用者要求：合併成一張表，同一個統計量（月數/平均杯數/最大值/最小值）
+        # 平日、假日欄位要放在旁邊，不要像之前那樣拆成左右兩張各自獨立、時段對不齊的表。
+        wd_by_hour = {row["時段"]: row for row in daytype_stats["平日"]}
+        we_by_hour = {row["時段"]: row for row in daytype_stats["假日"]}
+        all_hours = sorted(set(wd_by_hour) | set(we_by_hour))
+        merged_rows = [
+            {
+                "時段": h,
+                "平日_月數": wd_by_hour.get(h, {}).get("月數"),
+                "假日_月數": we_by_hour.get(h, {}).get("月數"),
+                "平日_平均杯數": wd_by_hour.get(h, {}).get("平均杯數"),
+                "假日_平均杯數": we_by_hour.get(h, {}).get("平均杯數"),
+                "平日_最大值": wd_by_hour.get(h, {}).get("最大值"),
+                "假日_最大值": we_by_hour.get(h, {}).get("最大值"),
+                "平日_最小值": wd_by_hour.get(h, {}).get("最小值"),
+                "假日_最小值": we_by_hour.get(h, {}).get("最小值"),
+            }
+            for h in all_hours
+        ]
+        st.dataframe(pd.DataFrame(merged_rows), hide_index=True, use_container_width=True)
         st.caption(
             "「假日」欄是直接把使用者額外提供的星期六/日單日時段占比報表拿來平均，是真的量出來的數字。"
             "「平日」欄目前沒有對應的單日原始報表可以直接量，只能用代數反推：POS 系統本來就有的"
@@ -949,6 +1017,24 @@ def render_hourly_pattern_page() -> None:
             "真實資料，準確度比之前用發票交易筆數比例去猜的估計版本高很多。"
             "「月數」是有真實假日樣本可以反推的月份數，不是所有已匯入月份都會出現在這裡。"
         )
+
+        chart_df = pd.DataFrame(
+            [{"時段": h, "類型": "平日", "平均杯數": wd_by_hour[h]["平均杯數"]} for h in all_hours if h in wd_by_hour]
+            + [{"時段": h, "類型": "假日", "平均杯數": we_by_hour[h]["平均杯數"]} for h in all_hours if h in we_by_hour]
+        )
+        daytype_cups_chart = (
+            alt.Chart(chart_df)
+            .mark_line(point=True, strokeWidth=2)
+            .encode(
+                x=alt.X("時段:N", title="時段"),
+                y=alt.Y("平均杯數:Q", title="平均杯數（杯）"),
+                color=alt.Color("類型:N", legend=alt.Legend(title=None)),
+                tooltip=["時段", "類型", "平均杯數"],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(daytype_cups_chart, use_container_width=True)
+        st.caption("兩條線的差距就是平日/假日杯量需求的落差，尖峰時段落差越大代表越需要分開排班，不能套同一套班表。")
 
     st.subheader("星期幾 x 時段實際排班人力（正職/兼職眾數）")
     date_range_row = conn.execute(

@@ -206,6 +206,7 @@ CREATE TABLE monthly_pnl (
     cogs INTEGER NOT NULL,
     material_waste INTEGER NOT NULL DEFAULT 0,  -- 原物料損耗/報廢，2026-07-10 新增，= cogs × material_waste_pct
     labor_cost INTEGER NOT NULL,
+    labor_cost_source TEXT NOT NULL DEFAULT 'estimate',  -- 2026-07-14 新增：'real_payroll'（calculate_payroll.py 真實薪資彙總，含雇主保費，不再乘概算保費率）／'manual_actual'（手動輸入底薪×概算保費率）／'estimate'（全概算）
     rent INTEGER NOT NULL,
     utilities INTEGER NOT NULL,
     franchise_amortization INTEGER NOT NULL,

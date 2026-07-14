@@ -15,6 +15,7 @@ calculate_staffing.calculate_hourly_staffing() 算出的建議人力做逐時段
     python3 -m scripts.compare_staffing
 """
 import sqlite3
+from datetime import date
 from pathlib import Path
 from statistics import mean
 
@@ -131,6 +132,84 @@ def compare_aggregate(conn, config, store_id, year_months):
             }
         )
     return rows
+
+
+def actual_hourly_average_by_daytype(conn, store_id, hour_slots):
+    """回傳 {"平日": {hour_slot: 平均實際人力}, "假日": {hour_slot: 平均實際人力}}，
+    用 raw_staffing_actual 的真實 business_date 分平日(一~五)/假日(六日)，各自的分母
+    只算「這個分類下有排班資料的天數」，跟 calculate_actual_hourly_average() 同一套
+    算法，只是先依日期分兩組再各自算，不是全部混在一起算一個月平均。"""
+    rows = conn.execute(
+        "SELECT business_date, start_time, end_time FROM raw_staffing_actual "
+        "WHERE store_id = ? AND start_time IS NOT NULL AND end_time IS NOT NULL",
+        (store_id,),
+    ).fetchall()
+
+    grouped = {"平日": {"days": set(), "intervals": []}, "假日": {"days": set(), "intervals": []}}
+    for r in rows:
+        daytype = "假日" if date.fromisoformat(r["business_date"]).weekday() >= 5 else "平日"
+        grouped[daytype]["days"].add(r["business_date"])
+        grouped[daytype]["intervals"].append((_time_to_minutes(r["start_time"]), _time_to_minutes(r["end_time"])))
+
+    result = {"平日": {}, "假日": {}}
+    for daytype, data in grouped.items():
+        days, intervals = data["days"], data["intervals"]
+        if not days:
+            continue
+        for hour_slot in hour_slots:
+            hour = int(hour_slot)
+            window_start, window_end = hour * 60, (hour + 1) * 60
+            count = sum(1 for s, e in intervals if s < window_end and e > window_start)
+            result[daytype][hour_slot] = round(count / len(days), 2)
+    return result
+
+
+def compare_daytype(conn, config, store_id):
+    """平日/假日各自的「建議人力 vs 實際人力」逐時段比對，杯量端用
+    analyze_staffing_daytype.cup_stats_by_daytype() 的真實資料反推（只涵蓋這個店有
+    真實星期六/日單日樣本的月份，比 compare_aggregate() 涵蓋的月份範圍窄，但每個
+    數字都是真實資料撐出來的，不是把平日假日混在一起的模糊平均）。外送耗時修正
+    沒有平日/假日拆分的原始資料，用跨月日均值套用到兩組（近似值，見
+    estimate_staffing_by_weekday.avg_delivery_by_hour() 同一套做法）。
+
+    回傳 {"平日": [...], "假日": [...]}，每筆 {hour_slot, cups, recommended, formula,
+    actual, diff}，cups/recommended/formula 沒有真實假日樣本涵蓋到的時段不會出現。
+    """
+    from scripts.analyze_staffing_daytype import HOUR_SLOTS, cup_stats_by_daytype
+    from scripts.calculate_staffing import calculate_delivery_hours, is_tea_brewing_hour, required_front_staff_for_hour
+    from scripts.estimate_staffing_by_weekday import avg_delivery_by_hour
+
+    months = [
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT year_month FROM raw_hourly_pattern_monthly WHERE store_id = ? ORDER BY 1",
+            (store_id,),
+        ).fetchall()
+    ]
+    cup_stats = cup_stats_by_daytype(conn, store_id, months)
+    delivery_by_hour = avg_delivery_by_hour(conn, store_id)
+    actual_by_daytype = actual_hourly_average_by_daytype(conn, store_id, HOUR_SLOTS)
+
+    result = {"平日": [], "假日": []}
+    for daytype in ("平日", "假日"):
+        cup_by_hour = {row["時段"][:2]: row["平均杯數"] for row in cup_stats[daytype]}
+        for hour_slot in HOUR_SLOTS:
+            cups = cup_by_hour.get(hour_slot)
+            if cups is None:
+                continue
+            delivery_hours = calculate_delivery_hours(delivery_by_hour.get(hour_slot, 0.0), config)
+            is_tea = is_tea_brewing_hour(hour_slot, config)
+            calc = required_front_staff_for_hour(cups, delivery_hours, is_tea, config)
+            actual = actual_by_daytype[daytype].get(hour_slot)
+            diff = None if actual is None else round(actual - calc["required"], 2)
+            result[daytype].append({
+                "hour_slot": hour_slot,
+                "cups": cups,
+                "recommended": calc["required"],
+                "formula": calc["formula"],
+                "actual": actual,
+                "diff": diff,
+            })
+    return result
 
 
 def print_report(store_id, year_month, rows):

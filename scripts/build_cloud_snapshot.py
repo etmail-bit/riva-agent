@@ -165,16 +165,17 @@ def migrate_monthly_pnl(local, cloud):
         cloud.execute(
             """
             INSERT INTO monthly_pnl
-                (store_id, year_month, revenue, cogs, material_waste, labor_cost, rent, utilities,
-                 franchise_amortization, platform_commission, payment_processing_fee,
+                (store_id, year_month, revenue, cogs, material_waste, labor_cost, labor_cost_source,
+                 rent, utilities, franchise_amortization, platform_commission, payment_processing_fee,
                  business_tax, pretax_profit, income_tax_estimate, net_profit,
                  revenue_source, calculated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(store_id, year_month) DO UPDATE SET
                 revenue = excluded.revenue,
                 cogs = excluded.cogs,
                 material_waste = excluded.material_waste,
                 labor_cost = excluded.labor_cost,
+                labor_cost_source = excluded.labor_cost_source,
                 rent = excluded.rent,
                 utilities = excluded.utilities,
                 franchise_amortization = excluded.franchise_amortization,
@@ -189,9 +190,9 @@ def migrate_monthly_pnl(local, cloud):
             """,
             (
                 r["store_id"], r["year_month"], r["revenue"], r["cogs"], r["material_waste"],
-                r["labor_cost"], r["rent"], r["utilities"], r["franchise_amortization"],
-                r["platform_commission"], r["payment_processing_fee"], r["business_tax"],
-                r["pretax_profit"], r["income_tax_estimate"], r["net_profit"],
+                r["labor_cost"], r["labor_cost_source"], r["rent"], r["utilities"],
+                r["franchise_amortization"], r["platform_commission"], r["payment_processing_fee"],
+                r["business_tax"], r["pretax_profit"], r["income_tax_estimate"], r["net_profit"],
                 r["revenue_source"], r["calculated_at"],
             ),
         )
