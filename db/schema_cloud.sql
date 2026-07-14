@@ -152,6 +152,7 @@ CREATE TABLE IF NOT EXISTS staffing_hourly_comparison_daytype (
     hour_slot TEXT NOT NULL,
     cups REAL,
     recommended INTEGER,
+    raw REAL,
     formula TEXT,
     actual REAL,
     diff REAL,

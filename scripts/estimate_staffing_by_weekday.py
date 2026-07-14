@@ -122,6 +122,7 @@ def estimate_staffing_by_weekday(conn, store_id, config) -> dict:
             per_weekday_hour[wd][hour_slot] = {
                 "est_cups": est_cups,
                 "required_front_staff": calc["required"],
+                "required_front_staff_raw": calc["raw"],
                 "required_front_staff_formula": calc["formula"],
                 "tea_brewing": is_tea,
             }
@@ -133,6 +134,7 @@ def estimate_staffing_by_weekday(conn, store_id, config) -> dict:
             cell = per_weekday_hour[wd][hour_slot]
             row[f"星期{wd}_估計杯數"] = cell["est_cups"] if cell else None
             row[f"星期{wd}_建議人力"] = cell["required_front_staff"] if cell else None
+            row[f"星期{wd}_取整前結果"] = cell["required_front_staff_raw"] if cell else None
             row[f"星期{wd}_公式"] = cell["required_front_staff_formula"] if cell else None
         rows.append(row)
 

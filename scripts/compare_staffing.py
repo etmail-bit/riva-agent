@@ -205,6 +205,7 @@ def compare_daytype(conn, config, store_id):
                 "hour_slot": hour_slot,
                 "cups": cups,
                 "recommended": calc["required"],
+                "raw": calc["raw"],
                 "formula": calc["formula"],
                 "actual": actual,
                 "diff": diff,

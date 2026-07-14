@@ -385,17 +385,18 @@ def migrate_staffing_comparison_daytype(local, cloud, staffing_config):
                 cloud.execute(
                     """
                     INSERT INTO staffing_hourly_comparison_daytype
-                        (store_id, daytype, hour_slot, cups, recommended, formula, actual, diff)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        (store_id, daytype, hour_slot, cups, recommended, raw, formula, actual, diff)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(store_id, daytype, hour_slot) DO UPDATE SET
                         cups = excluded.cups,
                         recommended = excluded.recommended,
+                        raw = excluded.raw,
                         formula = excluded.formula,
                         actual = excluded.actual,
                         diff = excluded.diff,
                         generated_at = datetime('now')
                     """,
-                    (store_id, daytype, row["hour_slot"], row["cups"], row["recommended"],
+                    (store_id, daytype, row["hour_slot"], row["cups"], row["recommended"], row["raw"],
                      row["formula"], row["actual"], row["diff"]),
                 )
                 n += 1

@@ -803,7 +803,8 @@ def render_staffing_page() -> None:
             "時段": f"{hour_slot}:00",
             "日均杯數": staffing[hour_slot]["cups"],
             "建議前場人力": staffing[hour_slot]["required_front_staff"],
-            "公式（取整前）": staffing[hour_slot]["required_front_staff_formula"],
+            "計算結果（取整前）": staffing[hour_slot]["required_front_staff_raw"],
+            "公式": staffing[hour_slot]["required_front_staff_formula"],
             "開早班": "Y" if staffing[hour_slot]["tea_brewing"] else "",
             "日均外送單": staffing[hour_slot]["delivery_count"],
             "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
@@ -872,7 +873,8 @@ def render_staffing_page() -> None:
                     {
                         "時段": f"{r['hour_slot']}:00",
                         "建議人力": r["recommended"],
-                        "公式（取整前）": r["formula"],
+                        "計算結果（取整前）": r["raw"],
+                        "公式": r["formula"],
                         "實際平均人力": r["actual"],
                         "差異": r["diff"],
                     }
@@ -1099,7 +1101,8 @@ def render_hourly_pattern_page() -> None:
                 "建議人力": recommended,
                 "實際人力": actual,
                 "估計杯數": r.get(f"星期{staffing_weekday_choice}_估計杯數"),
-                "公式（取整前）": r.get(f"星期{staffing_weekday_choice}_公式"),
+                "計算結果（取整前）": r.get(f"星期{staffing_weekday_choice}_取整前結果"),
+                "公式": r.get(f"星期{staffing_weekday_choice}_公式"),
             })
         # 「實際人力」欄位是 None（不是 0）的時段，Altair 對 None 的數值長條不會畫，
         # 呈現效果就是那根長條留空，不會被誤讀成「實際排 0 人」。
@@ -1127,7 +1130,7 @@ def render_hourly_pattern_page() -> None:
         )
         with st.expander(f"看星期{staffing_weekday_choice}每個時段的取整前公式（例如 ceil(2.01) 才知道差多少就多/少一人）"):
             st.dataframe(
-                pd.DataFrame(merged_rows)[["時段", "估計杯數", "公式（取整前）", "建議人力", "實際人力"]],
+                pd.DataFrame(merged_rows)[["時段", "估計杯數", "計算結果（取整前）", "公式", "建議人力", "實際人力"]],
                 hide_index=True, use_container_width=True,
             )
 

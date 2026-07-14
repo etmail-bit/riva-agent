@@ -754,7 +754,8 @@ def render_staffing_summary_page() -> None:
                 "時段": f"{hour_slot}:00",
                 "日均杯數": staffing[hour_slot]["cups"],
                 "建議前場人力": staffing[hour_slot]["required_front_staff"],
-                "公式（取整前）": staffing[hour_slot]["required_front_staff_formula"],
+                "計算結果（取整前）": staffing[hour_slot]["required_front_staff_raw"],
+                "公式": staffing[hour_slot]["required_front_staff_formula"],
                 "開早班": "Y" if staffing[hour_slot]["tea_brewing"] else "",
                 "日均外送單": staffing[hour_slot]["delivery_count"],
                 "外送耗時(hr)": staffing[hour_slot]["delivery_hours"],
@@ -824,7 +825,7 @@ def render_staffing_summary_page() -> None:
     months_note = ""
     if compare_mode == "平日/假日拆分（真實資料）":
         daytype_rows = conn.execute(
-            "SELECT daytype, hour_slot, cups, recommended, formula, actual, diff "
+            "SELECT daytype, hour_slot, cups, recommended, raw, formula, actual, diff "
             "FROM staffing_hourly_comparison_daytype WHERE store_id = ? ORDER BY daytype, hour_slot",
             (store_id,),
         ).fetchall()
@@ -846,7 +847,8 @@ def render_staffing_summary_page() -> None:
                         {
                             "時段": f"{r['hour_slot']}:00",
                             "建議人力": r["recommended"],
-                            "公式（取整前）": r["formula"],
+                            "計算結果（取整前）": r["raw"],
+                            "公式": r["formula"],
                             "實際平均人力": r["actual"],
                             "差異": r["diff"],
                         }
@@ -1025,6 +1027,7 @@ def render_staffing_summary_page() -> None:
                     "hour_slot": hour_slot,
                     "estimated_cups": est_cups,
                     "recommended": calc["required"],
+                    "raw": calc["raw"],
                     "formula": calc["formula"],
                     "actual": roster_actual_by_hour.get(hour_slot, {}).get(weekday),
                 })
@@ -1042,7 +1045,8 @@ def render_staffing_summary_page() -> None:
                     {
                         "時段": f"{r['hour_slot']}:00",
                         "估計杯數": r["estimated_cups"],
-                        "公式（取整前）": r["formula"],
+                        "計算結果（取整前）": r["raw"],
+                        "公式": r["formula"],
                         "建議人力": r["recommended"],
                         "實際人力": r["actual"],
                     }
