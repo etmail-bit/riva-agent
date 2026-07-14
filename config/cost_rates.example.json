@@ -40,7 +40,9 @@
     "business_tax_note": "一般營業人 5%，小規模營業人可能是 1%",
 
     "corporate_income_tax_pct": 0.20,
-    "corporate_income_tax_note": "有限公司/股份有限公司適用；獨資商號請設為 0，改用個人綜所稅估算"
+    "corporate_income_tax_note": "有限公司/股份有限公司適用；獨資商號請設為 0，改用個人綜所稅估算",
+    "deemed_profit_ratio_pct": 0.06,
+    "deemed_profit_ratio_note": "擴大書審純益率（同業利潤標準，依行業別由國稅局公告，範例值），跟 corporate_income_tax_pct 分開存——所得稅 = max(帳面稅前淨利×稅率（虧損時為0）, 營業收入×此比率×稅率)，取較高者"
   },
 
   "no_ongoing_franchise_royalty": true

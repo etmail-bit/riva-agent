@@ -23,7 +23,14 @@ from yaml.loader import SafeLoader
 
 from scripts.analyze_operations import channel_mix, hourly_channel_by_weekday, repeat_customer_stats, weekday_daily_summary
 from scripts.analyze_staffing_daytype import WEEKDAY_NAMES, cup_stats_by_daytype, roster_mode_by_weekday
-from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
+from scripts.calculate_pnl import (
+    COST_ACTUAL_COLUMNS,
+    calculate_one,
+    get_fixed_cost,
+    get_revenue_breakdown,
+    income_tax_breakdown,
+    save_pnl_result,
+)
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import calculate_hourly_staffing, get_hourly_data, is_shift_active
 from scripts.calculate_staffing import load_config as load_staffing_config
@@ -670,6 +677,23 @@ def render_pnl_page() -> None:
         ]
 
     st.dataframe(pd.DataFrame(_breakdown_rows(display), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+
+    # 2026-07-14 新增：所得稅不是只看帳面損益，是「帳面稅」跟「推定稅」（擴大書審，
+    # 營業收入×同業利潤標準×稅率，不管賺賠都要繳）比較取較高者——這裡把兩個數字都
+    # 攤開給使用者看，不是只顯示一個黑盒結果，跟已儲存/即時試算用同一組 revenue/
+    # pretax_profit 重算，確保跟上面明細表的「預估所得稅」數字對得起來。
+    book_tax, deemed_tax, _, tax_source = income_tax_breakdown(
+        display["revenue"], display["pretax_profit"],
+        working_config["variable_cost_rates"]["corporate_income_tax_pct"],
+        working_config["variable_cost_rates"].get("deemed_profit_ratio_pct", 0),
+    )
+    tax_source_label = "推定稅（擴大書審）" if tax_source == "deemed" else "帳面稅"
+    st.caption(
+        f"所得稅取較高者：帳面稅（稅前淨利×20%，虧損時0）＝ {book_tax:,}　vs　"
+        f"推定稅（營業收入×6%同業利潤標準×20%，不管賺賠都要繳）＝ {deemed_tax:,}　"
+        f"→ 這個月用**{tax_source_label}**。"
+    )
+
     if saved_pnl is not None and saved_pnl["net_profit"] != result["net_profit"]:
         with st.expander("目前試算結果明細（參數或資料來源跟已儲存版本不同才會出現差異）"):
             st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)

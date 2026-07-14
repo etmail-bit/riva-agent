@@ -9,7 +9,8 @@
       − 人事（見下方「人事成本三層優先順序」）
       − 房租 − 水電 − 加盟金攤提 − 營業稅（只算「應稅」部分 × 5%，不是全部營收）
       = 稅前淨利
-    稅前淨利 × 20% = 預估所得稅（虧損月份不倒扣，最低 0）
+    預估所得稅 = max(帳面稅（稅前淨利 × 20%，虧損月份不倒扣，最低 0）,
+                      推定稅（營業收入 × 6% 同業利潤標準 × 20%）)    ← 見下方「所得稅：帳面稅 vs 推定稅」
     稅前淨利 − 預估所得稅 = 稅後淨利
 
 人事成本三層優先順序（2026-07-14 新增，取代原本「底薪 × 1.196 雇主保費負擔率」單一算法）：
@@ -30,6 +31,17 @@
 輸入欄位的三項：人事底薪、原物料、水電（人事底薪這項 2026-07-14 起還要先看有沒有真實
 薪資計算可用，見上方）。房租、加盟金攤提沒有實際值輸入機制，一律用 config（這兩項本來
 就是固定金額，不像人事/原物料/水電會逐月浮動）。
+
+所得稅：帳面稅 vs 推定稅（2026-07-14 會計師提醒新增，取代原本單純「稅前淨利×20%」的算法）：
+    使用者原本一開始就提過小商家常見的「擴大書審」簡化申報方式，但一直沒有真的接進公式
+    ——這次補上。所得稅不是只看帳面損益，是拿兩個數字比較、**取較高者**：
+    1. **帳面稅**（`income_tax_book`）：稅前淨利 × `corporate_income_tax_pct`（20%），
+       虧損月份不倒扣，最低 0，這是原本唯一在用的算法。
+    2. **推定稅**（`income_tax_deemed`）：營業收入 × `deemed_profit_ratio_pct`（6%，國稅局
+       公告的同業利潤標準/擴大書審純益率）× `corporate_income_tax_pct`（20%）——**不管
+       帳面賺賠都要繳這筆**，是稅局用來防止小商家虛報虧損逃稅的機制，不是帳面淨利的函數。
+    `income_tax_source` 欄位（'book'／'deemed'）記錄這個月實際是哪一個比較高、被拿來用，
+    兩個數字都會回傳（不是只回傳一個黑盒結果），網頁會同時顯示方便對帳。
 
 用法：
     source .venv/bin/activate
@@ -181,6 +193,18 @@ def get_cost_actuals(conn, store_id, year_month):
     return dict(row)
 
 
+def income_tax_breakdown(revenue, pretax_profit, corporate_income_tax_pct, deemed_profit_ratio_pct):
+    """算「帳面稅 vs 推定稅」取較高者，見檔頭 docstring「所得稅：帳面稅 vs 推定稅」一節。
+    抽成獨立函式，讓 UI 層可以拿已經存檔的 revenue／pretax_profit 重算這兩個數字給使用者看
+    （已儲存紀錄本身沒有存這兩欄，兩者都能從已經存的 revenue/pretax_profit 反推出來，
+    不需要另外加資料庫欄位）。回傳 (帳面稅, 推定稅, 較高者, 'book'或'deemed')。"""
+    income_tax_book = max(0, round(pretax_profit * corporate_income_tax_pct))
+    income_tax_deemed = round(revenue * deemed_profit_ratio_pct * corporate_income_tax_pct)
+    income_tax_estimate = max(income_tax_book, income_tax_deemed)
+    income_tax_source = "deemed" if income_tax_deemed > income_tax_book else "book"
+    return income_tax_book, income_tax_deemed, income_tax_estimate, income_tax_source
+
+
 def calculate_one(conn, config, store_id, year_month):
     revenue_row, revenue_source = get_revenue_breakdown(conn, store_id, year_month)
     revenue = revenue_row["revenue"] or 0
@@ -270,7 +294,10 @@ def calculate_one(conn, config, store_id, year_month):
         - franchise_amortization
         - business_tax
     )
-    income_tax_estimate = max(0, round(pretax_profit * corporate_income_tax_pct))
+    deemed_profit_ratio_pct = rates.get("deemed_profit_ratio_pct", 0)
+    income_tax_book, income_tax_deemed, income_tax_estimate, income_tax_source = income_tax_breakdown(
+        revenue, pretax_profit, corporate_income_tax_pct, deemed_profit_ratio_pct
+    )
     net_profit = pretax_profit - income_tax_estimate
 
     return {
@@ -287,6 +314,9 @@ def calculate_one(conn, config, store_id, year_month):
         "business_tax": business_tax,
         "pretax_profit": pretax_profit,
         "income_tax_estimate": income_tax_estimate,
+        "income_tax_book": income_tax_book,
+        "income_tax_deemed": income_tax_deemed,
+        "income_tax_source": income_tax_source,
         "net_profit": net_profit,
         "revenue_source": revenue_source,
     }

@@ -30,7 +30,14 @@ from dotenv import load_dotenv
 from yaml.loader import SafeLoader
 
 from scripts.analyze_staffing_daytype import HOUR_SLOTS, WEEKDAY_NAMES, cup_stats_by_daytype
-from scripts.calculate_pnl import COST_ACTUAL_COLUMNS, calculate_one, get_fixed_cost, get_revenue_breakdown, save_pnl_result
+from scripts.calculate_pnl import (
+    COST_ACTUAL_COLUMNS,
+    calculate_one,
+    get_fixed_cost,
+    get_revenue_breakdown,
+    income_tax_breakdown,
+    save_pnl_result,
+)
 from scripts.calculate_pnl import load_config as load_pnl_config
 from scripts.calculate_staffing import (
     calculate_delivery_hours,
@@ -658,6 +665,21 @@ def render_pnl_page() -> None:
         ]
 
     st.dataframe(pd.DataFrame(_breakdown_rows(display), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
+
+    # 2026-07-14 新增：所得稅取「帳面稅」跟「推定稅」（擴大書審，不管賺賠都要繳）
+    # 較高者，兩個數字都攤開顯示，跟已儲存/即時試算用同一組 revenue/pretax_profit 重算。
+    book_tax, deemed_tax, _, tax_source = income_tax_breakdown(
+        display["revenue"], display["pretax_profit"],
+        working_config["variable_cost_rates"]["corporate_income_tax_pct"],
+        working_config["variable_cost_rates"].get("deemed_profit_ratio_pct", 0),
+    )
+    tax_source_label = "推定稅（擴大書審）" if tax_source == "deemed" else "帳面稅"
+    st.caption(
+        f"所得稅取較高者：帳面稅（稅前淨利×20%，虧損時0）＝ {book_tax:,}　vs　"
+        f"推定稅（營業收入×6%同業利潤標準×20%，不管賺賠都要繳）＝ {deemed_tax:,}　"
+        f"→ 這個月用**{tax_source_label}**。"
+    )
+
     if saved_pnl is not None and saved_pnl["net_profit"] != result["net_profit"]:
         with st.expander("目前試算結果明細（參數或資料來源跟已儲存版本不同才會出現差異）"):
             st.dataframe(pd.DataFrame(_breakdown_rows(result), columns=["項目", "金額"]), hide_index=True, use_container_width=True)
